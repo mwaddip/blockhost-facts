@@ -563,7 +563,7 @@ Conflicts: blockhost-provisioner-proxmox
 
 | Content | Destination |
 |---------|-------------|
-| CLI commands | `/usr/bin/blockhost-vm-*`, `/usr/bin/blockhost-build-template`, `/usr/bin/blockhost-provisioner-detect`, `/usr/bin/blockhost-mint-nft` |
+| CLI commands | `/usr/bin/blockhost-vm-*`, `/usr/bin/blockhost-build-template`, `/usr/bin/blockhost-provisioner-detect` |
 | Manifest | `/usr/share/blockhost/provisioner.json` |
 | First-boot hook | `/usr/share/blockhost/provisioner-hooks/first-boot.sh` |
 | Root agent actions | `/usr/share/blockhost/root-agent-actions/<name>.py` |
@@ -584,9 +584,9 @@ Recommends: <hypervisor-specific packages>
 
 Documented for awareness. These exist in the current implementation.
 
-### `blockhost-mint-nft` not in manifest dispatch
+### ~~`blockhost-mint-nft` not in manifest dispatch~~ (RESOLVED)
 
-The engine hardcodes `blockhost-mint-nft` at `handlers/index.ts:324` instead of resolving through `getCommand("mint-nft")`. The manifest has no `"mint-nft"` verb. Decision: minting belongs in the engine, not in provisioners. This is not a contract violation — it's correctly engine-owned.
+~~The engine hardcodes `blockhost-mint-nft` instead of resolving through manifest.~~ Resolved: `mint_nft.py` moved from provisioner packages to blockhost-engine. The CLI (`/usr/bin/blockhost-mint-nft`) and Python module (`blockhost.mint_nft`) are now shipped by the engine .deb. The manifest correctly has no `"mint-nft"` verb — minting is engine-owned.
 
 ### ~~Hardcoded `/opt/` paths in app.py~~ (FIXED)
 

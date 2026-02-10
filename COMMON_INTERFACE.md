@@ -145,8 +145,8 @@ This is the real interface. Everything else is a wrapper around this.
 
 | Function | Calls Action | Params |
 |----------|-------------|--------|
-| `ip6_route_add(address, dev="vmbr0")` | `ip6-route-add` | `{address, dev}` |
-| `ip6_route_del(address, dev="vmbr0")` | `ip6-route-del` | `{address, dev}` |
+| `ip6_route_add(address, dev="vmbr0")` | `ip6-route-add` | `{address, dev}` | Always pass `dev` explicitly |
+| `ip6_route_del(address, dev="vmbr0")` | `ip6-route-del` | `{address, dev}` | Always pass `dev` explicitly |
 | `generate_wallet(name)` | `generate-wallet` | `{name}` |
 | `addressbook_save(entries)` | `addressbook-save` | `{entries}` |
 
@@ -155,16 +155,9 @@ This is the real interface. Everything else is a wrapper around this.
 - `RootAgentError` — base exception, agent returned `{"ok": false}`
 - `RootAgentConnectionError(RootAgentError)` — socket unreachable
 
-### Contract Violations (existing)
+### Note on Convenience Wrappers
 
-| Export | Problem | Resolution |
-|--------|---------|------------|
-| `qm_start(vmid)` | Proxmox-specific. Calls `qm-start` action. | Provisioner should call `call("qm-start", vmid=vmid)` directly |
-| `qm_stop(vmid)` | Same | Same |
-| `qm_shutdown(vmid)` | Same | Same |
-| `qm_destroy(vmid)` | Same | Same |
-
-These wrappers leak Proxmox into common's public API. Consumers should use the generic `call()` with provisioner-specific action names. The wrappers can be deprecated.
+`ip6_route_add()` and `ip6_route_del()` default to `dev="vmbr0"`. Callers should always pass `dev` explicitly — the default is a Proxmox-ism. The libvirt provisioner uses `call()` directly, which avoids this.
 
 ---
 
@@ -225,17 +218,9 @@ IPV6_CIDR128_RE  = re.compile(r'^([0-9a-fA-F:]+)/128$')
 - `run(cmd: list, timeout: int = 120) -> tuple[int, str, str]` — returns `(returncode, stdout, stderr)`
 
 **Allowed Sets:**
-- `ALLOWED_ROUTE_DEVS = frozenset({'vmbr0'})`
+- `ALLOWED_ROUTE_DEVS = frozenset({'vmbr0', 'virbr0', 'br0', 'br-ext', 'docker0'})`
 - `WALLET_DENY_NAMES = frozenset({'admin', 'server', 'dev', 'broker'})`
 - `VIRT_CUSTOMIZE_ALLOWED_OPS` — validated operations for virt-customize
-- `QM_SET_ALLOWED_KEYS`, `QM_CREATE_ALLOWED_ARGS` — Proxmox-specific allow lists
-
-### Contract Violations (existing)
-
-| Item | Problem | Resolution |
-|------|---------|------------|
-| `ALLOWED_ROUTE_DEVS = {'vmbr0'}` | vmbr0 is Proxmox's bridge name. libvirt uses different bridge names. | Make configurable or expand the allowed set |
-| `QM_SET_ALLOWED_KEYS`, `QM_CREATE_ALLOWED_ARGS` | Proxmox-specific constants in shared _common | Move to provisioner-proxmox's action module |
 
 ---
 
@@ -435,18 +420,20 @@ contract_address: "0x..."
 
 ---
 
-## 9. Contract Violations & Cleanup Needed
+## 9. Contract Violations & Cleanup Status
 
-| # | Item | Location | Problem | Resolution |
-|---|------|----------|---------|------------|
-| 1 | `qm_start/stop/shutdown/destroy` | `root_agent.py` | Proxmox-specific wrappers in common | Deprecate. Provisioners call `call()` directly. |
-| 2 | `get_terraform_dir()` | `config.py` | Terraform is Proxmox-specific | Move to provisioner-proxmox or generalize |
-| 3 | `TERRAFORM_DIR` constant | `config.py`, `__init__.py` | Same | Remove from common |
-| 4 | `mint_nft` module | `blockhost/mint_nft.py` (if present) | Minting is engine responsibility | Move to engine |
-| 5 | `LEGACY_COMMANDS` fallback | `provisioner.py` | Hardcoded Proxmox commands when no manifest | Remove — no manifest = no provisioner |
-| 6 | `ALLOWED_ROUTE_DEVS = {'vmbr0'}` | `_common.py` | vmbr0 is Proxmox-specific bridge name | Make configurable or expand set |
-| 7 | `QM_SET_ALLOWED_KEYS`, `QM_CREATE_ALLOWED_ARGS` | `_common.py` | Proxmox constants in shared code | Move to provisioner-proxmox's `qm.py` |
-| 8 | `vmid_range` optional in db.yaml | `vm_db.py` | VMID is Proxmox-specific (libvirt uses domain names) | `allocate_vmid()` should only exist where needed |
+| # | Item | Location | Problem | Status |
+|---|------|----------|---------|--------|
+| 1 | ~~`qm_start/stop/shutdown/destroy`~~ | ~~`root_agent.py`~~ | ~~Proxmox-specific wrappers in common~~ | RESOLVED: removed from codebase |
+| 2 | ~~`get_terraform_dir()`~~ | ~~`config.py`~~ | ~~Terraform is Proxmox-specific~~ | RESOLVED: removed from codebase |
+| 3 | ~~`TERRAFORM_DIR` constant~~ | ~~`config.py`, `__init__.py`~~ | ~~Same~~ | RESOLVED: removed from codebase |
+| 4 | ~~`mint_nft` module~~ | ~~`blockhost/mint_nft.py`~~ | ~~Minting is engine responsibility~~ | RESOLVED: moved to blockhost-engine |
+| 5 | ~~`LEGACY_COMMANDS` fallback~~ | ~~`provisioner.py`~~ | ~~Hardcoded Proxmox commands when no manifest~~ | RESOLVED: removed from codebase |
+| 6 | ~~`ALLOWED_ROUTE_DEVS = {'vmbr0'}`~~ | ~~`_common.py`~~ | ~~vmbr0 is Proxmox-specific bridge name~~ | RESOLVED: expanded to include virbr0, br0, br-ext, docker0 |
+| 7 | ~~`QM_SET_ALLOWED_KEYS`, `QM_CREATE_ALLOWED_ARGS`~~ | ~~`_common.py`~~ | ~~Proxmox constants in shared code~~ | RESOLVED: removed from codebase (live in provisioner-proxmox's qm.py) |
+| 8 | `vmid_range`/`allocate_vmid()` | `vm_db.py` | VMID is Proxmox-specific (libvirt uses domain names) | OPEN: present but dormant. libvirt never calls it. Architectural debt only. |
+
+**Remaining convenience wrapper debt:** `ip6_route_add/del()` default `dev="vmbr0"`. Not blocking — libvirt uses `call()` directly. Should be changed to require explicit `dev` parameter (no default).
 
 ---
 
@@ -454,8 +441,8 @@ contract_address: "0x..."
 
 | Package | Imports From Common | Config Files Read |
 |---------|--------------------|--------------------|
-| **blockhost-provisioner-proxmox** | config (5 functions), vm_db, root_agent (4 qm wrappers + ip6 + errors), cloud_init, mint_nft | db.yaml, web3-defaults.yaml, broker-allocation.json |
-| **blockhost-provisioner-libvirt** | (stubs — will use config, vm_db, root_agent.call, cloud_init) | db.yaml, web3-defaults.yaml, broker-allocation.json |
-| **blockhost (installer)** | config, mint_nft, provisioner dispatcher | web3-defaults.yaml |
+| **blockhost-provisioner-proxmox** | config (5 functions), vm_db, root_agent (ip6 wrappers + errors), cloud_init | db.yaml, web3-defaults.yaml, broker-allocation.json |
+| **blockhost-provisioner-libvirt** | config (3 functions), vm_db, root_agent (`call()` direct), cloud_init | db.yaml, web3-defaults.yaml, broker-allocation.json |
+| **blockhost (installer)** | config, provisioner dispatcher | web3-defaults.yaml |
 | **blockhost-engine** | config, vm_db, root_agent | db.yaml, web3-defaults.yaml |
 | **blockhost-broker** | config (broker allocation) | broker-allocation.json |
