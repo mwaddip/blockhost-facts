@@ -373,7 +373,7 @@ The POST handler must:
 1. Save all provisioner config to `session[<session_key>]` as a dict
 2. Redirect to `url_for("wizard_ipv6")` (the next step after provisioner config)
 
-Templates must extend `base.html` and use the `step_bar` macro.
+Templates must extend `base.html` and use the `step_bar` macro. See `facts/WIZARD_UI.md` for the complete style guide — HTML patterns, CSS classes, components, and anti-patterns.
 
 ### Finalization Steps
 

@@ -10,6 +10,7 @@ Every BlockHost repo adds this as a submodule. When an interface changes, it cha
 |----------|--------|
 | `PROVISIONER_INTERFACE.md` | Provisioner contract: manifest, CLI commands, wizard plugin, root agent actions, first-boot hook |
 | `COMMON_INTERFACE.md` | blockhost-common public API: config, VM database, root agent protocol, cloud-init, provisioner dispatcher |
+| `WIZARD_UI.md` | Wizard UI style guide: HTML patterns, CSS classes, components, anti-patterns |
 
 ## Usage
 
