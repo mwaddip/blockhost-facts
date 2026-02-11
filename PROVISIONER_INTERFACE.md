@@ -459,11 +459,12 @@ The root agent daemon's `_common` module (from blockhost-common) provides:
 | `log(msg)` | function | Log to root agent log file |
 | `run(cmd, timeout=120)` | function | `-> (returncode, stdout, stderr)`. Runs subprocess with timeout. |
 | `validate_vmid(value)` | function | Validates and returns integer VMID. Raises on invalid. |
-| `QM_CREATE_ALLOWED_ARGS` | set | Proxmox-specific. Whitelist for qm create flags. |
-| `QM_SET_ALLOWED_KEYS` | set | Proxmox-specific. Whitelist for qm set keys. |
+| `validate_ipv6_128(address)` | function | Validates IPv6/128 CIDR. Returns address string. Raises on invalid. |
+| `validate_dev(dev)` | function | Validates network device name against `ALLOWED_ROUTE_DEVS`. Raises on invalid. |
 | `STORAGE_RE` | regex | Validates storage pool names. |
+| `ALLOWED_ROUTE_DEVS` | frozenset | `{'vmbr0', 'virbr0', 'br0', 'br-ext', 'docker0'}` |
 
-Non-Proxmox provisioners will primarily use `log`, `run`, and potentially `STORAGE_RE`. The QM-specific constants are only relevant to the Proxmox provisioner.
+Provisioner action modules use `log`, `run`, and the validators. Proxmox-specific constants (`QM_CREATE_ALLOWED_ARGS`, `QM_SET_ALLOWED_KEYS`) are defined locally in `qm.py`, not in `_common`.
 
 ### Security Model
 
