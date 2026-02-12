@@ -244,7 +244,7 @@ Module: `blockhost.cloud_init`
 
 | Template | Variables Required | Purpose |
 |----------|-------------------|---------|
-| `nft-auth.yaml` | `VM_NAME`, `SIGNING_HOST`, `USERNAME`, `NFT_TOKEN_ID`, `CHAIN_ID`, `NFT_CONTRACT`, `RPC_URL`, `OTP_LENGTH`, `OTP_TTL`, `SECRET_KEY` | NFT-authenticated VM with PAM module |
+| `nft-auth.yaml` | `VM_NAME`, `SIGNING_HOST`, `SIGNING_DOMAIN`, `USERNAME`, `NFT_TOKEN_ID`, `CHAIN_ID`, `NFT_CONTRACT`, `RPC_URL`, `OTP_LENGTH`, `OTP_TTL`, `SECRET_KEY` | NFT-authenticated VM with PAM module |
 | `webserver.yaml` | (none) | nginx + UFW |
 | `devbox.yaml` | (none) | Build tools + dev environment |
 
@@ -362,13 +362,16 @@ auth:
   "prefix": "2a11:6c7:f04:276::/120",
   "gateway": "2a11:6c7:f04:276::1",
   "broker_pubkey": "...",
-  "broker_endpoint": "..."
+  "broker_endpoint": "...",
+  "dns_zone": "blockhost.thawaras.org"
 }
 ```
 
 **Owned by**: blockhost-broker-client (writes on allocation)
-**Read by**: common's `load_broker_allocation()`, VM database (IPv6 pool)
+**Read by**: common's `load_broker_allocation()`, VM database (IPv6 pool), provisioners (FQDN derivation)
 **Optional**: Missing = no IPv6 allocation available
+
+**`dns_zone`** (optional string): Broker's authoritative DNS zone. When present, the broker runs an authoritative DNS server mapping `{hex_label}.{dns_zone}` → `{prefix}::{hex_label}`. Provisioners derive per-VM FQDNs by converting the IPv6 offset to lowercase hex: `f"{offset:x}.{dns_zone}"`. Enables Let's Encrypt on VM signing pages (HTTPS instead of HTTP). Missing or empty = signing pages use raw IP (current HTTP behavior).
 
 ### `/etc/blockhost/blockhost.yaml`
 
