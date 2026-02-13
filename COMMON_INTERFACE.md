@@ -184,6 +184,7 @@ Shipped in `root-agent-actions/system.py` and `networking.py`:
 | `virt-customize` | `{image_path: str, commands: list[list]}` | `{ok, output}` | system.py |
 | `generate-wallet` | `{name: str}` | `{ok, address}` | system.py |
 | `addressbook-save` | `{entries: dict}` | `{ok}` | system.py |
+| `broker-renew` | `{}` (none) | `{ok, output}` | system.py |
 | `ip6-route-add` | `{address: str, dev: str}` | `{ok, output}` | networking.py |
 | `ip6-route-del` | `{address: str, dev: str}` | `{ok, output}` | networking.py |
 
