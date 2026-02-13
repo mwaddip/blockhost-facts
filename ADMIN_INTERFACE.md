@@ -93,8 +93,9 @@ All API routes require `@login_required`. Request/response is JSON.
 |--------|-------|---------|----------|
 | GET | `/api/network` | — | `{ipv4, gateway, dns: str[], ipv6_broker: {prefix, status}?}` |
 | POST | `/api/network/broker/renew` | — | `{ok: bool, error?: str}` |
+| POST | `/api/network/cert/renew` | — | `{ok: bool, error?: str}` |
 
-Broker renew goes through root agent action `broker-renew`.
+Broker renew goes through root agent action `broker-renew`. Cert renew runs `certbot renew --non-interactive` (webroot mode, no downtime).
 
 ### Security
 
