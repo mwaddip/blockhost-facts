@@ -344,12 +344,14 @@ deployer:
   private_key_file: "/etc/blockhost/deployer.key"
 
 signing_page:
-  port: 8080
+  port: 8443
   html_path: "/usr/share/libpam-web3-tools/signing-page/index.html"
 
 auth:
   otp_length: 6
   otp_ttl_seconds: 300
+  callback_enabled: true
+  callback_grace_seconds: 10
 ```
 
 **Owned by**: common (ships template in .deb)
@@ -372,7 +374,7 @@ auth:
 **Read by**: common's `load_broker_allocation()`, VM database (IPv6 pool), provisioners (FQDN derivation)
 **Optional**: Missing = no IPv6 allocation available
 
-**`dns_zone`** (optional string): Broker's authoritative DNS zone. When present, the broker runs an authoritative DNS server mapping `{hex_label}.{dns_zone}` → `{prefix}::{hex_label}`. Provisioners derive per-VM FQDNs by converting the IPv6 offset to lowercase hex: `f"{offset:x}.{dns_zone}"`. Enables Let's Encrypt on VM signing pages (HTTPS instead of HTTP). Missing or empty = signing pages use raw IP (current HTTP behavior).
+**`dns_zone`** (optional string): Broker's authoritative DNS zone. When present, the broker runs an authoritative DNS server mapping `{hex_label}.{dns_zone}` → `{prefix}::{hex_label}`. Provisioners derive per-VM FQDNs by converting the IPv6 offset to lowercase hex: `f"{offset:x}.{dns_zone}"`. Enables Let's Encrypt on VM signing pages (replaces self-signed TLS cert). Missing or empty = signing pages use IP with self-signed cert.
 
 ### `/etc/blockhost/blockhost.yaml`
 
