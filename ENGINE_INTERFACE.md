@@ -22,14 +22,7 @@ to these as subprocesses. Exit 0 = success, non-zero = failure (stderr has error
 
 **Installed:** `/usr/bin/is`
 
-Standalone binary. Answers yes/no identity questions via exit code. No env vars, no addressbook — pure cryptographic and on-chain queries. Arguments are order-independent; types are unambiguous (signatures are long hex blobs, addresses are `0x` + 40 hex, NFT IDs are integers, `contract` is a keyword).
-
-#### `is <signature> <wallet>`
-
-Verify that a wallet produced a given signature. Replaces `cast wallet verify`.
-
-**Exit:** 0 = signature matches wallet, 1 = does not match.
-**Consumers:** `admin/auth.py` (replaces `cast wallet verify --address`)
+Standalone binary. Answers yes/no identity questions via exit code. No env vars, no addressbook — pure on-chain queries. Arguments are order-independent; types are unambiguous (addresses are `0x` + 40 hex, NFT IDs are integers, `contract` is a keyword).
 
 #### `is <wallet> <nft_id>`
 
@@ -167,9 +160,14 @@ Uses Uniswap V2 `swapExactTokensForETH()` with 1% slippage buffer.
 
 #### `bw who`
 
+Two forms — NFT owner lookup and signature recovery.
+
 ```
 bw who <identifier>
+bw who <message> <signature>
 ```
+
+**Form 1: NFT owner lookup**
 
 | Arg | Required | Description |
 |-----|----------|-------------|
@@ -180,6 +178,19 @@ Queries `ownerOf(tokenId)` on the AccessCredentialNFT contract. Config sourced f
 **stdout:** Owner address (`0x...`).
 **Exit:** 0 if found, 1 if not found or config missing.
 **Consumers:** `admin/auth.py` (`["bw", "who", "admin"]` — resolves admin NFT holder for auth)
+
+**Form 2: Signature recovery — PLANNED**
+
+| Arg | Required | Description |
+|-----|----------|-------------|
+| `message` | yes | The message that was signed |
+| `signature` | yes | The signature (hex) |
+
+Recovers the signer address from a message and signature. Replaces `cast wallet verify` — the caller compares the returned address with the expected address. Pure crypto, no chain queries.
+
+**stdout:** Signer address (`0x...`).
+**Exit:** 0 if recovery succeeds, 1 on invalid signature.
+**Consumers:** `admin/auth.py` (replaces `cast wallet verify --address`; caller compares with `bw who admin` output)
 
 #### `bw config stable` — PLANNED
 
@@ -1050,7 +1061,7 @@ All `cast` calls in the installer and admin are replaced by engine CLIs:
 | `cast send updateUserEncrypted` | `bw set encrypt <nft_id> <data>` | `finalize.py` |
 | `cast call balanceOf` (NFT) | `bw balance <contract>` | `finalize.py` |
 | `cast call tokenOfOwnerByIndex` | Eliminated — ID is 0 (fresh deploy) or user-supplied | `finalize.py` |
-| `cast wallet verify` | `is <signature> <wallet>` | `admin/auth.py` |
+| `cast wallet verify` | `bw who <message> <signature>` + compare with `bw who admin` | `admin/auth.py` |
 | `cast wallet address` | `ab new` (derives address internally) | `utils.py` |
 | `cast call totalSupply` | `is contract <address>` | `validate_system.py` |
 
