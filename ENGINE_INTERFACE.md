@@ -328,11 +328,11 @@ ab list
 ab --init
 ```
 
-Bootstrap the addressbook with initial required entries. Sets up any wallets that must exist before the system is operational. Replaces the wallet-generation portion of `blockhost-init`.
+Bootstrap the addressbook with initial required entries (admin, server, dev, broker). Replaces the installer's direct JSON file writes to `addressbook.json` during finalization.
 
-The deployer/server wallet is generated interactively through the wizard UI (which calls `ab new server` behind the scenes when the user clicks "generate"). `ab --init` handles non-interactive bootstrap entries only.
+The deployer/server wallet is generated interactively through the wizard UI (which calls `ab new server` behind the scenes when the user clicks "generate"). `ab --init` takes the generated entries and writes a properly structured addressbook.
 
-**Consumers:** Engine wizard finalization or first-boot
+**Consumers:** Engine wizard finalization step
 
 #### Immutable Roles
 
