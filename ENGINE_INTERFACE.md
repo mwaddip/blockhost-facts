@@ -18,6 +18,57 @@ to these as subprocesses. Exit 0 = success, non-zero = failure (stderr has error
 
 ---
 
+### `is` (identity predicate) — PLANNED
+
+**Installed:** `/usr/bin/is`
+
+Standalone binary. Answers yes/no identity questions via exit code. No env vars, no addressbook — pure cryptographic and on-chain queries. Arguments are order-independent; types are unambiguous (signatures are long hex blobs, addresses are `0x` + 40 hex, NFT IDs are integers, `contract` is a keyword).
+
+#### `is <signature> <wallet>`
+
+Verify that a wallet produced a given signature. Replaces `cast wallet verify`.
+
+**Exit:** 0 = signature matches wallet, 1 = does not match.
+**Consumers:** `admin/auth.py` (replaces `cast wallet verify --address`)
+
+#### `is <wallet> <nft_id>`
+
+Check whether a wallet owns a specific NFT. Queries `ownerOf(tokenId)` on the AccessCredentialNFT contract, compares with provided wallet.
+
+**Config:** `web3-defaults.yaml` (nft_contract, rpc_url)
+**Exit:** 0 = wallet owns the NFT, 1 = does not.
+**Consumers:** Installer (verify admin NFT ownership after setup with pre-deployed contracts)
+
+#### `is contract <address>`
+
+Check whether a smart contract exists at the given address. Replaces `cast call totalSupply()` as a contract liveness check.
+
+**Config:** `web3-defaults.yaml` (rpc_url)
+**Exit:** 0 = contract exists, 1 = no contract at address.
+**Consumers:** `installer/web/validate_system.py` (replaces `cast call` health checks)
+
+---
+
+### `blockhost-deploy-contracts` — PLANNED
+
+**Installed:** `/usr/bin/blockhost-deploy-contracts` (bash script)
+
+```
+blockhost-deploy-contracts          # deploy both NFT and subscription contracts
+blockhost-deploy-contracts nft      # deploy NFT contract only
+blockhost-deploy-contracts pos      # deploy subscription contract only
+```
+
+No flags — positional argument, optional. Absent means both. When deploying both, NFT is deployed first and its address is passed to the subscription contract constructor automatically.
+
+Reads deployer key and RPC from existing config (`/etc/blockhost/deployer.key`, `web3-defaults.yaml`). Replaces all `cast send --create` + `cast abi-encode` calls in `finalize.py`.
+
+**stdout:** Contract address(es), one per line. Installer captures and writes to config files.
+**Exit:** 0/1.
+**Consumers:** Engine wizard finalization step (replaces `_deploy_contract_with_forge` in installer)
+
+---
+
 ### `bw` (blockwallet)
 
 **Installed:** `/usr/bin/bw` (wrapper → `/usr/share/blockhost/bw.js`)
@@ -51,12 +102,14 @@ bw balance <role> [token]
 
 | Arg | Required | Description |
 |-----|----------|-------------|
-| `role` | yes | Addressbook role or `0x` address (read-only — no keyfile needed) |
+| `role` | yes | Addressbook role, `0x` address, or contract address (read-only — no keyfile needed) |
 | `token` | no | `eth`, `stable`, or `0x` address. If omitted, shows all active payment method tokens |
+
+Works for both ERC20 tokens and NFT contracts — both implement `balanceOf()`. For NFTs, returns integer count (no decimals). **PLANNED:** extend to accept contract addresses directly (not just addressbook roles) for NFT balance checks.
 
 **stdout:** Balance information (human-readable).
 **Exit:** 0/1.
-**Consumers:** `admin/system.py` (`_run_bw(["balance", role])`)
+**Consumers:** `admin/system.py` (`_run_bw(["balance", role])`), installer validation (NFT balance check, replaces `cast call balanceOf`)
 
 #### `bw split`
 
@@ -127,6 +180,56 @@ Queries `ownerOf(tokenId)` on the AccessCredentialNFT contract. Config sourced f
 **stdout:** Owner address (`0x...`).
 **Exit:** 0 if found, 1 if not found or config missing.
 **Consumers:** `admin/auth.py` (`["bw", "who", "admin"]` — resolves admin NFT holder for auth)
+
+#### `bw config stable` — PLANNED
+
+```
+bw config stable [address]
+```
+
+| Arg | Required | Description |
+|-----|----------|-------------|
+| `address` | no | Stablecoin token address to set as primary |
+
+No argument: show current primary stablecoin address. With argument: call `setPrimaryStablecoin(address)` on the subscription contract. Replaces `cast send ... setPrimaryStablecoin` in `finalize.py`.
+
+**stdout:** Current or newly set stablecoin address.
+**Exit:** 0/1.
+**Consumers:** Engine wizard finalization step (replaces `_create_default_plan` stablecoin setup)
+
+#### `bw plan create` — PLANNED
+
+```
+bw plan create <name> <price>
+```
+
+| Arg | Required | Description |
+|-----|----------|-------------|
+| `name` | yes | Plan name (string) |
+| `price` | yes | Price in USD cents per day (integer) |
+
+Calls `createPlan(name, pricePerDayUsdCents)` on the subscription contract. Replaces `cast send ... createPlan` in `finalize.py`.
+
+**stdout:** Created plan ID.
+**Exit:** 0/1.
+**Consumers:** Engine wizard finalization step (replaces `_create_default_plan` plan creation)
+
+#### `bw set encrypt` — PLANNED
+
+```
+bw set encrypt <nft_id> <userEncrypted>
+```
+
+| Arg | Required | Description |
+|-----|----------|-------------|
+| `nft_id` | yes | NFT token ID (integer) |
+| `userEncrypted` | yes | Hex-encoded encrypted data |
+
+Calls `updateUserEncrypted(tokenId, bytes)` on the NFT contract. Replaces `cast send ... updateUserEncrypted` in `finalize.py`.
+
+**stdout:** Transaction hash.
+**Exit:** 0/1.
+**Consumers:** Installer finalization (`_finalize_mint_nft` — update admin NFT metadata)
 
 #### `bw --debug --cleanup`
 
@@ -219,9 +322,21 @@ ab list
 
 **Consumers:** None directly (addressbook read by file I/O in most consumers).
 
+#### `ab --init` — PLANNED
+
+```
+ab --init
+```
+
+Bootstrap the addressbook with initial required entries. Sets up any wallets that must exist before the system is operational. Replaces the wallet-generation portion of `blockhost-init`.
+
+The deployer/server wallet is generated interactively through the wizard UI (which calls `ab new server` behind the scenes when the user clicks "generate"). `ab --init` handles non-interactive bootstrap entries only.
+
+**Consumers:** Engine wizard finalization or first-boot
+
 #### Immutable Roles
 
-`server`, `admin`, `hot`, `dev`, `broker` — cannot be added, deleted, updated, or generated via `ab`. These are managed by the installer finalization and fund-manager.
+`server`, `admin`, `hot`, `dev`, `broker` — cannot be added, deleted, updated, or generated via `ab` (except `ab --init` for bootstrap). These are managed by the installer finalization and fund-manager.
 
 #### Addressbook JSON Schema
 
@@ -285,9 +400,16 @@ def mint_nft(
 
 ---
 
-### `blockhost-init`
+### `blockhost-init` — DEPRECATION PLANNED
 
 **Installed:** `/usr/bin/blockhost-init` (bash script)
+
+> **Planned:** Wallet generation responsibilities move to `ab new server` (called by wizard UI)
+> and `ab --init` (non-interactive bootstrap). Server ECIES key generation (not a wallet —
+> used for userEncrypted decryption and admin command decryption) remains as a distinct
+> operation, either retained in a slimmed-down `blockhost-init` or moved to engine wizard
+> finalization. Config file initialization (`blockhost.yaml`, `vms.json`) moves to engine
+> wizard finalization steps.
 
 ```
 sudo blockhost-init \
@@ -798,11 +920,15 @@ Depends: blockhost-common (>= 0.1.0), libpam-web3-tools (>= 0.5.0), nodejs (>= 1
 | bw wrapper | `/usr/bin/bw` |
 | ab CLI (esbuild bundle) | `/usr/share/blockhost/ab.js` |
 | ab wrapper | `/usr/bin/ab` |
+| is CLI (esbuild bundle) | `/usr/share/blockhost/is.js` — PLANNED |
+| is wrapper | `/usr/bin/is` — PLANNED |
+| Contract deployer | `/usr/bin/blockhost-deploy-contracts` — PLANNED |
 | NFT minter (Python) | `/usr/bin/blockhost-mint-nft` |
 | NFT minter (module) | `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` |
-| Init script | `/usr/bin/blockhost-init` |
+| Init script | `/usr/bin/blockhost-init` — DEPRECATION PLANNED |
 | Signup generator | `/usr/bin/blockhost-generate-signup` |
 | Signup template | `/usr/share/blockhost/signup-template.html` |
+| Wizard plugin | `/usr/lib/python3/dist-packages/blockhost/engine_evm/` — PLANNED |
 | Contract source | `/opt/blockhost/contracts/BlockhostSubscriptions.sol` |
 | Contract artifact | `/usr/share/blockhost/contracts/BlockhostSubscriptions.json` |
 | Deploy scripts | `/opt/blockhost/scripts/deploy.ts`, `create-plan.ts` |
@@ -851,28 +977,88 @@ The following template placeholders are EVM-specific and would need equivalents 
 
 ---
 
-## 10. Known Issues & Abstraction Debt
+## 10. Engine Wizard Plugin — PLANNED
 
-### `cast` used directly by installer and admin (OPEN)
+The engine contributes a blockchain configuration page and finalization steps to the installer wizard, following the same plugin pattern as the provisioner (see `PROVISIONER_INTERFACE.md` §3).
 
-`installer/web/finalize.py` and `installer/web/utils.py` call Foundry's `cast` directly for:
-- Contract deployment (`cast send --create`)
-- NFT balance checks (`cast call ... balanceOf`)
-- Token ID queries (`cast call ... tokenOfOwnerByIndex`)
-- NFT metadata updates (`cast send ... updateUserEncrypted`)
-- Plan creation (`cast send ... createPlan`)
-- Stablecoin setup (`cast send ... setPrimaryStablecoin`)
-- Address derivation (`cast wallet address`)
+### Motivation
 
-`admin/auth.py` calls `cast wallet verify` for signature verification.
+The installer's `blockchain.html` wizard page and all chain-specific finalization steps (`_finalize_keypair`, `_finalize_wallet`, `_finalize_contracts`, `_finalize_config` chain fields, `_finalize_mint_nft`, `_create_default_plan`) currently live in the installer repo with hardcoded EVM assumptions. Moving them to the engine makes the installer chain-agnostic.
 
-These bypass the engine CLI boundary. A second chain adapter would need either:
-- Equivalent `cast`-like CLI for its chain, or
-- Engine CLIs that wrap these operations (e.g., `blockhost-deploy`, `blockhost-verify-sig`)
+### Engine Manifest Extension
+
+Add to a new engine manifest file (analogous to `provisioner.json`):
+
+```json
+{
+  "name": "evm",
+  "version": "0.1.0",
+  "display_name": "EVM (Ethereum/Base/Sepolia)",
+
+  "setup": {
+    "wizard_module": "blockhost.engine_evm.wizard",
+    "finalization_steps": ["keypair", "wallet", "contracts", "config", "mint_nft", "plan", "signup"]
+  }
+}
+```
+
+### Required Exports
+
+Same pattern as provisioner wizard plugin:
+
+| Export | Type | Signature |
+|--------|------|-----------|
+| `blueprint` | `flask.Blueprint` | Registers blockchain wizard route(s) |
+| `get_finalization_steps()` | function | `-> list[tuple[str, str, callable]]` |
+| `get_summary_data(session)` | function | `-> dict` |
+| `get_summary_template()` | function | `-> str` |
+
+### What Moves to Engine
+
+| Current location | Moves to |
+|-----------------|----------|
+| `installer/web/templates/wizard/blockchain.html` | Engine wizard template |
+| `installer/web/finalize.py` → `_finalize_keypair` | Engine finalization step |
+| `installer/web/finalize.py` → `_finalize_wallet` | Engine finalization step (calls `ab new server`) |
+| `installer/web/finalize.py` → `_finalize_contracts` | Engine finalization step (calls `blockhost-deploy-contracts`) |
+| `installer/web/finalize.py` → `_finalize_mint_nft` | Engine finalization step (calls `blockhost-mint-nft` + `bw set encrypt`) |
+| `installer/web/finalize.py` → `_create_default_plan` | Engine finalization step (calls `bw plan create` + `bw config stable`) |
+| `installer/web/finalize.py` → `_finalize_signup` | Engine finalization step (calls `blockhost-generate-signup`) |
+| `installer/web/utils.py` → `generate_secp256k1_keypair*` | Engine wizard module (or `ab new`) |
+| `installer/web/utils.py` → `get_address_from_key` | Engine wizard module (or `ab new`) |
+
+### What Stays in Installer
+
+- Wizard framework (step bar, navigation, session management)
+- Non-chain finalization steps (network, HTTPS, nginx, validation)
+- OTP auth, provisioner plugin discovery
+- `validate_system.py` (but chain-specific checks delegate to engine CLIs like `is contract`)
+
+---
+
+## 11. Known Issues & Abstraction Debt
+
+### ~~`cast` used directly by installer and admin~~ (PLANNED)
+
+All `cast` calls in the installer and admin are replaced by engine CLIs:
+
+| `cast` call | Replaced by | Location |
+|-------------|-------------|----------|
+| `cast send --create` (contract deployment) | `blockhost-deploy-contracts [nft\|pos]` | `finalize.py` |
+| `cast send createPlan` | `bw plan create <name> <price>` | `finalize.py` |
+| `cast send setPrimaryStablecoin` | `bw config stable <address>` | `finalize.py` |
+| `cast send updateUserEncrypted` | `bw set encrypt <nft_id> <data>` | `finalize.py` |
+| `cast call balanceOf` (NFT) | `bw balance <contract>` | `finalize.py` |
+| `cast call tokenOfOwnerByIndex` | Eliminated — ID is 0 (fresh deploy) or user-supplied | `finalize.py` |
+| `cast wallet verify` | `is <signature> <wallet>` | `admin/auth.py` |
+| `cast wallet address` | `ab new` (derives address internally) | `utils.py` |
+| `cast call totalSupply` | `is contract <address>` | `validate_system.py` |
+
+Chain-specific finalization steps move to engine wizard plugin (§10). The installer becomes chain-agnostic.
 
 ### `mint_nft.py` dual install path (OPEN)
 
-Installed as both `/usr/bin/blockhost-mint-nft` (CLI) and `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` (importable module). The monitor calls it as a CLI; the installer imports it as Python. Both paths must work.
+Installed as both `/usr/bin/blockhost-mint-nft` (CLI) and `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` (importable module). The monitor calls it as a CLI; the installer imports it as Python. Both paths must work. With the engine wizard plugin, the Python import path is used by the engine's own finalization step (same submodule), reducing the cross-boundary concern.
 
 ### Hardcoded chain configs in `chain-pools.ts` (OPEN)
 
@@ -882,16 +1068,14 @@ Uniswap V2 router addresses, WETH addresses, and pair addresses are hardcoded pe
 
 Monitor polling intervals (5s event poll, 5min reconcile, 30min gas check, 24h fund cycle) are hardcoded or configured in seconds/minutes/hours. A chain-specific `BLOCK_TIME` constant could scale these intervals relative to block production speed, making them meaningful across chains with different block times.
 
-### Signup page placeholders are EVM-specific (OPEN)
+### ~~Signup page placeholders are EVM-specific~~ (PLANNED)
 
-`CHAIN_ID`, `USDC_ADDRESS`, `NFT_CONTRACT`, `SUBSCRIPTION_CONTRACT` assume EVM addressing. A non-EVM chain adapter would need to either:
-- Map its identifiers to these placeholders, or
-- Ship its own signup template
+Resolved by engine wizard plugin. Each engine ships its own signup template via `blockhost-generate-signup`. The template and its placeholders are engine-owned — a second engine provides its own template with chain-appropriate fields.
 
-### `installer/web/utils.py` generates secp256k1 keys directly (OPEN)
+### ~~`installer/web/utils.py` generates secp256k1 keys directly~~ (PLANNED)
 
-Key generation uses `eth_keys` library (with `ecdsa` and `cast` fallbacks). This is secp256k1-specific. If a chain adapter uses a different curve, the installer would need to delegate key generation to an engine CLI (e.g., extending `blockhost-init`).
+Key generation moves to engine wizard plugin finalization steps. The wizard UI calls `ab new server` when the user clicks "generate." The installer no longer imports `eth_keys`, `ecdsa`, or calls `cast wallet address` — all key operations go through engine CLIs.
 
-### `validate_system.py` uses `cast call` for contract queries (OPEN)
+### ~~`validate_system.py` uses `cast call` for contract queries~~ (PLANNED)
 
-Post-install validation queries `totalSupply()` on the NFT contract via `cast call`. A second engine would need either Foundry installed or an engine CLI for contract health checks.
+Replaced by `is contract <address>` — a chain-agnostic contract liveness check.
