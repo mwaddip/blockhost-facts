@@ -1013,6 +1013,29 @@ Add to a new engine manifest file (analogous to `provisioner.json`):
 }
 ```
 
+### `constraints` (manifest key)
+
+Chain-specific format patterns for input validation and UI rendering. Consumers (installer `app.py`, admin panel `auth.py`, `system.py`) load these at startup. No hardcoded format assumptions exist in consumers — all chain-specific validation comes from this key.
+
+| Field | Type | Description | Example (EVM) |
+|-------|------|-------------|---------------|
+| `address_pattern` | regex | Valid wallet/contract address | `^0x[0-9a-fA-F]{40}$` |
+| `signature_pattern` | regex | Valid signature format | `^0x[0-9a-fA-F]{130}$` |
+| `native_token` | string | Native currency keyword for CLI | `eth` |
+| `native_token_label` | string | Display label for native currency | `ETH` |
+| `token_pattern` | regex | Valid token contract address | `^0x[0-9a-fA-F]{40}$` |
+| `address_placeholder` | string | Input placeholder text | `0x...` |
+
+All regex patterns must be anchored (`^...$`). Consumers compile with `re.compile()`.
+
+If `constraints` is absent, consumers skip format validation and let CLIs (`bw`, `ab`, `is`) reject invalid input. The key is optional but strongly recommended — it enables pre-validation with friendly error messages.
+
+**Consumers:**
+- `admin/auth.py`: `address_pattern` (validate `bw who admin` output), `signature_pattern` (validate user-submitted signatures)
+- `admin/system.py`: `address_pattern` (addressbook add), `token_pattern` + `native_token` (wallet send/withdraw)
+- `admin/app.py` → templates: `native_token_label`, `address_placeholder` (UI labels and placeholders)
+- `installer/web/app.py`: `validate_address()` from engine wizard module (separate mechanism, same purpose)
+
 ### Required Exports
 
 Same pattern as provisioner wizard plugin:
@@ -1061,7 +1084,7 @@ All `cast` calls in the installer and admin are replaced by engine CLIs:
 | `cast send updateUserEncrypted` | `bw set encrypt <nft_id> <data>` | `finalize.py` |
 | `cast call balanceOf` (NFT) | `bw balance <contract>` | `finalize.py` |
 | `cast call tokenOfOwnerByIndex` | Eliminated — ID is 0 (fresh deploy) or user-supplied | `finalize.py` |
-| `cast wallet verify` | `bw who <message> <signature>` + compare with `bw who admin` | `admin/auth.py` |
+| `cast wallet verify` | `bw who <message> <signature>` + engine `constraints` (signature validation) | `admin/auth.py` |
 | `cast wallet address` | `ab new` (derives address internally) | `utils.py` |
 | `cast call totalSupply` | `is contract <address>` | `validate_system.py` |
 
@@ -1090,3 +1113,11 @@ Key generation moves to engine wizard plugin finalization steps. The wizard UI c
 ### ~~`validate_system.py` uses `cast call` for contract queries~~ (PLANNED)
 
 Replaced by `is contract <address>` — a chain-agnostic contract liveness check.
+
+### ~~`cast wallet verify` in admin/auth.py~~ (RESOLVED)
+
+Replaced by `bw who <message> <signature>` for signature recovery + engine `constraints.signature_pattern` for input validation. The caller compares the returned address with `bw who admin` output. No direct `cast` dependency remains in auth.
+
+### ~~Admin panel hardcoded EVM format assumptions~~ (RESOLVED)
+
+All format validation in the admin panel (`auth.py`, `system.py`) now comes from engine manifest `constraints`. No hardcoded `0x` prefix checks, `len == 42`, or `len == 132` remain. If `constraints` is absent from the manifest, format validation is skipped and CLIs handle rejection.
