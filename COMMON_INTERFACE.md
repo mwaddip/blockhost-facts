@@ -245,7 +245,7 @@ Module: `blockhost.cloud_init`
 
 | Template | Variables Required | Purpose |
 |----------|-------------------|---------|
-| `nft-auth.yaml` | `VM_NAME`, `SIGNING_HOST`, `SIGNING_DOMAIN`, `USERNAME`, `NFT_TOKEN_ID`, `CHAIN_ID`, `NFT_CONTRACT`, `RPC_URL`, `OTP_LENGTH`, `OTP_TTL`, `SECRET_KEY` | NFT-authenticated VM with PAM module |
+| `nft-auth.yaml` | `VM_NAME`, `SIGNING_HOST`, `SIGNING_DOMAIN`, `USERNAME`, `WALLET_ADDRESS`, `NFT_TOKEN_ID`, `OTP_LENGTH`, `OTP_TTL`, `SECRET_KEY` | NFT-authenticated VM with PAM module |
 | `webserver.yaml` | (none) | nginx + UFW |
 | `devbox.yaml` | (none) | Build tools + dev environment |
 

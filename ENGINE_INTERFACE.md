@@ -626,6 +626,7 @@ Verifies local `vms.json` NFT state matches on-chain:
 - Checks for tokens that exist on-chain but aren't marked minted locally
 - Checks `reserved_nft_tokens` map for un-minted reservations
 - Fixes discrepancies by marking tokens as minted (via Python `blockhost.vm_db` or direct JSON update)
+- **Syncs NFT ownership to VM GECOS fields:** When an NFT transfer is detected (owner address on-chain differs from `owner_wallet` in vms.json), the reconciler: (1) updates `owner_wallet` in vms.json, (2) calls provisioner `update-gecos` command to update the VM's GECOS field. Failed GECOS updates are tracked via `gecos_synced` flag and retried on subsequent cycles. This is the sole mechanism by which VMs learn about ownership changes. libpam-web3 verifies signatures against the GECOS-stored wallet address — no chain queries at auth time.
 
 **Config reads:** `web3-defaults.yaml` (nft_contract), `blockhost.yaml` (fallback)
 
@@ -1098,9 +1099,9 @@ Installed as both `/usr/bin/blockhost-mint-nft` (CLI) and `/usr/lib/python3/dist
 
 Uniswap V2 router addresses, WETH addresses, and pair addresses are hardcoded per chain ID. Adding a new EVM chain requires code changes. Should be configurable (in `blockhost.yaml` or `web3-defaults.yaml`).
 
-### No BLOCK_TIME constant (OPEN)
+### ~~No BLOCK_TIME constant~~ (RESOLVED)
 
-Monitor polling intervals (5s event poll, 5min reconcile, 30min gas check, 24h fund cycle) are hardcoded or configured in seconds/minutes/hours. A chain-specific `BLOCK_TIME` constant could scale these intervals relative to block production speed, making them meaningful across chains with different block times.
+Monitor and reconciler are engine-internal processes. Each engine is built for a specific blockchain and knows its own block time — no cross-boundary constant needed. The engine sets whatever polling intervals make sense for its chain internally.
 
 ### ~~Signup page placeholders are EVM-specific~~ (PLANNED)
 
