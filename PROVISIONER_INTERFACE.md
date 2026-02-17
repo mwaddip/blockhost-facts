@@ -34,7 +34,8 @@ The manifest is the single discovery mechanism. Every consumer finds the provisi
     "throttle":       "<executable-name>",
     "build-template": "<executable-name>",
     "gc":             "<executable-name>",
-    "resume":         "<executable-name>"
+    "resume":         "<executable-name>",
+    "update-gecos":   "<executable-name>"
   },
 
   "setup": {
@@ -117,7 +118,7 @@ blockhost-vm-create <name>
 | Arg | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `name` | yes | — | VM name (positional). Used as primary key everywhere. |
-| `--owner-wallet` | yes | — | Ethereum address (0x...). Owner of the access NFT. |
+| `--owner-wallet` | yes | — | Wallet address (chain-agnostic format). Owner of the access NFT. |
 | `--cpu` | no | 1 | vCPU count. |
 | `--memory` | no | 2048 | Memory in MB. |
 | `--disk` | no | 20 | Disk in GB. |
@@ -312,6 +313,33 @@ blockhost-vm-throttle <name>
 Apply resource limits. Currently unimplemented in all provisioners.
 
 **Exit:** 0 (even as stub).
+
+---
+
+### `update-gecos`
+
+```
+blockhost-vm-update-gecos <name> <wallet-address>
+```
+
+Updates the GECOS field of the VM's primary user to reflect a new wallet address. Called by the engine reconciler when an NFT ownership transfer is detected.
+
+| Arg | Required | Description |
+|-----|----------|-------------|
+| `name` | yes | VM name (positional) |
+| `wallet-address` | yes | New owner's wallet address (any chain format) |
+
+**Behavior:**
+1. Look up VM in database to get hypervisor-specific identifier and username
+2. Look up `nft_token_id` from VM record
+3. Construct GECOS string: `wallet=<wallet-address>,nft=<token_id>`
+4. Execute `usermod -c "<gecos>" <username>` on the running VM via QEMU guest agent
+
+**Exit:** 0 = GECOS updated. 1 = failed (VM stopped, guest agent unresponsive, VM not found).
+
+**Consumers:** Engine reconciler (ownership transfer detection).
+
+**Note:** The VM must be running with a responsive QEMU guest agent. If the VM is stopped or suspended, the command fails and the reconciler retries on the next cycle.
 
 ---
 
