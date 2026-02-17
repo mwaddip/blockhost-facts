@@ -114,6 +114,23 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 }
 ```
 
+### NFT Token Schema
+
+NFT tokens are tracked in a separate top-level `reserved_nft_tokens` map in the database (not inside VM records). Keyed by token ID (string).
+
+```python
+"reserved_nft_tokens": {
+    "<token_id>": {
+        "vm_name": str,
+        "status": "reserved" | "minted" | "failed",
+        "reserved_at": str,          # ISO 8601
+        "owner_wallet": Optional[str],  # Set on mint
+        "minted_at": Optional[str],     # Set on mint
+        "failed_at": Optional[str],     # Set on failure
+    }
+}
+```
+
 ### Storage
 
 - Production: JSON file with `fcntl` file locking at path from `db.yaml` → `db_file`
