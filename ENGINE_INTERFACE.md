@@ -1071,7 +1071,57 @@ Same pattern as provisioner wizard plugin:
 
 ---
 
-## 11. Known Issues & Abstraction Debt
+## 12. Auth Service Ownership
+
+The signing page HTTPS server (`web3-auth-svc`) is **engine-owned**. Signature processing is chain-specific (EVM uses ecrecover, OPNet validates OTP + wallet address), so the engine ships the auth-svc binary, signing page HTML, and systemd unit.
+
+### Deployment
+
+The engine produces a **template package** (installed on VMs, not the host) containing:
+
+| File | Purpose |
+|------|---------|
+| `/usr/bin/web3-auth-svc` | HTTPS signing server binary |
+| `/usr/share/blockhost/signing-page/index.html` | Signing page HTML |
+| `/lib/systemd/system/web3-auth-svc.service` | Systemd unit |
+
+This package goes into `packages/template/` alongside `libpam-web3` and is installed into VM base images during template build.
+
+### Interface with libpam-web3
+
+The auth-svc and PAM module communicate via `.sig` files — the same mechanism as before. The contract:
+
+| Component | Writes | Reads |
+|-----------|--------|-------|
+| `web3-auth-svc` | `/run/libpam-web3/pending/<session_id>.sig` | Session files from PAM |
+| PAM module | `/run/libpam-web3/pending/<session_id>` (session file) | `.sig` file content |
+
+**Content-based signature detection** (in PAM):
+- Raw hex (`0x` + 130 hex chars) → EVM path (ecrecover)
+- JSON `{"otp", "machine_id", "wallet_address"}` → OPNet path (OTP validation)
+
+**Callback mode activation**: PAM enables callback mode when `callback_enabled = true` in config AND the session directory exists (`/run/libpam-web3/pending/`). If no auth-svc is running (no session directory), PAM falls back to manual paste mode. The PAM module does not depend on the auth-svc binary — only on the file protocol.
+
+### What stays in libpam-web3
+
+- PAM module (`pam_web3.so`) — signature detection, GECOS lookup, OTP generation
+- Callback plumbing — session file creation, `.sig` file reading
+- TLS certificate directory structure (`/etc/libpam-web3/tls/`)
+- Config file (`/etc/pam_web3/config.toml`)
+
+### What moves to engine
+
+- `web3-auth-svc` binary and systemd unit
+- Signing page HTML
+- Auth-svc config (`/etc/web3-auth/config.toml`) — written by cloud-init template, references engine-provided binary
+
+### Cloud-init template impact
+
+The `nft-auth.yaml` template still writes the auth-svc config and enables the service. No template changes needed — the binary just comes from a different package. The template is engine-agnostic; it references paths that both EVM and OPNet auth-svc packages provide.
+
+---
+
+## 13. Known Issues & Abstraction Debt
 
 ### ~~`cast` used directly by installer and admin~~ (PLANNED)
 

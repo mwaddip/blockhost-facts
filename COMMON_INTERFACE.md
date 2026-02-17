@@ -262,7 +262,7 @@ Module: `blockhost.cloud_init`
 
 | Template | Variables Required | Purpose |
 |----------|-------------------|---------|
-| `nft-auth.yaml` | `VM_NAME`, `SIGNING_HOST`, `SIGNING_DOMAIN`, `USERNAME`, `WALLET_ADDRESS`, `NFT_TOKEN_ID`, `OTP_LENGTH`, `OTP_TTL`, `SECRET_KEY` | NFT-authenticated VM with PAM module |
+| `nft-auth.yaml` | `VM_NAME`, `SIGNING_HOST`, `SIGNING_DOMAIN`, `USERNAME`, `WALLET_ADDRESS`, `NFT_TOKEN_ID`, `OTP_LENGTH`, `OTP_TTL`, `SECRET_KEY` | NFT-authenticated VM with PAM module. Requires both `libpam-web3` (PAM) and engine auth-svc template package on VM. |
 | `webserver.yaml` | (none) | nginx + UFW |
 | `devbox.yaml` | (none) | Build tools + dev environment |
 
@@ -362,13 +362,11 @@ deployer:
 
 signing_page:
   port: 8443
-  html_path: "/usr/share/libpam-web3-tools/signing-page/index.html"
+  html_path: "/usr/share/blockhost/signing-page/index.html"  # Engine-provided
 
 auth:
   otp_length: 6
   otp_ttl_seconds: 300
-  callback_enabled: true
-  callback_grace_seconds: 10
 ```
 
 **Owned by**: common (ships template in .deb)
