@@ -319,7 +319,7 @@ Apply resource limits. Currently unimplemented in all provisioners.
 ### `update-gecos`
 
 ```
-blockhost-vm-update-gecos <name> <wallet-address>
+blockhost-vm-update-gecos <name> <wallet-address> --nft-id <token_id>
 ```
 
 Updates the GECOS field of the VM's primary user to reflect a new wallet address. Called by the engine reconciler when an NFT ownership transfer is detected.
@@ -327,13 +327,13 @@ Updates the GECOS field of the VM's primary user to reflect a new wallet address
 | Arg | Required | Description |
 |-----|----------|-------------|
 | `name` | yes | VM name (positional) |
-| `wallet-address` | yes | New owner's wallet address (any chain format) |
+| `wallet-address` | yes | New owner's wallet address (any chain format, positional) |
+| `--nft-id` | yes | NFT token ID (integer) |
 
 **Behavior:**
 1. Look up VM in database to get hypervisor-specific identifier and username
-2. Look up `nft_token_id` from VM record
-3. Construct GECOS string: `wallet=<wallet-address>,nft=<token_id>`
-4. Execute `usermod -c "<gecos>" <username>` on the running VM via QEMU guest agent
+2. Construct GECOS string: `wallet=<wallet-address>,nft=<nft_id>`
+3. Execute `usermod -c "<gecos>" <username>` on the running VM via QEMU guest agent
 
 **Exit:** 0 = GECOS updated. 1 = failed (VM stopped, guest agent unresponsive, VM not found).
 
