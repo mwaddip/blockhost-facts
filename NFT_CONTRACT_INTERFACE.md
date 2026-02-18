@@ -103,6 +103,7 @@ Standard OpenZeppelin ERC721 + Enumerable + Ownable:
 
 - `userEncrypted` per token (string) — ML-DSA encrypted connection details
 - `_totalSupply` tracked separately from `_nextTokenId` (burn decrements supply, IDs never reused)
+- Per-owner token arrays use `StoredU256Array` with the full 32-byte `Address` as sub-pointer (no truncation)
 
 No `publicSecret`, `description`, `imageUri`, `animationUrlBase64`, or `expiresAt` fields.
 
