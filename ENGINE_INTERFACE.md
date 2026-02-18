@@ -576,6 +576,11 @@ Requires `stablecoinReserve >= minLiquidityUsd` (default $10,000).
 - `userEncrypted` in `buySubscription` is ECIES-encrypted connection details — the engine decrypts with `server.key` after VM creation and re-encrypts for the NFT
 - Subscription IDs are sequential starting from 1
 
+### OPNet-Specific Notes
+
+- `days` parameter in `buySubscription` and `extendSubscription` is capped at 36500 (~100 years) — reverts with `Days exceeds maximum` if exceeded. Guards against u256→u64 truncation in duration calculation.
+- Per-subscriber subscription arrays use `StoredU256Array` with full 32-byte `Address` as sub-pointer (no truncation)
+
 ---
 
 ## 3. Monitor Service
