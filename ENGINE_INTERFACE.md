@@ -318,7 +318,7 @@ Update address for existing entry. Preserves `keyfile` field if present.
 ab new <name>
 ```
 
-Generate new secp256k1 keypair via `pam_web3_tool generate-keypair`. Saves private key to `/etc/blockhost/<name>.key` (chmod 600), adds entry to addressbook with `keyfile` field.
+Generate new secp256k1 keypair via `nft_tool generate-keypair`. Saves private key to `/etc/blockhost/<name>.key` (chmod 600), adds entry to addressbook with `keyfile` field.
 
 **Consumers:** `admin/system.py` (`_run_ab(["new", name])`)
 
@@ -444,7 +444,7 @@ sudo blockhost-init \
 4. Write `/etc/blockhost/blockhost.yaml` (public_secret, server_public_key, deployer_address, contract_address="")
 5. Initialize `/var/lib/blockhost/vms.json` (empty database)
 
-**Prerequisites:** `pam_web3_tool`, `cast` (Foundry), `/etc/blockhost/`, `/var/lib/blockhost/`
+**Prerequisites:** `nft_tool`, `cast` (Foundry), `/etc/blockhost/`, `/var/lib/blockhost/`
 
 **stdout:** Server public key, deployer address, public secret.
 **Exit:** 0/1.
@@ -925,8 +925,12 @@ WantedBy=multi-user.target
 
 **Dependencies:**
 ```
-Depends: blockhost-common (>= 0.1.0), libpam-web3-tools (>= 0.5.0), nodejs (>= 18), python3 (>= 3.10)
+Depends: blockhost-common (>= 0.1.0), nodejs (>= 18), python3 (>= 3.10)
+Provides: pam-web3-tool
+Conflicts: libpam-web3-tools
 ```
+
+> `libpam-web3-tools` is deprecated. The engine package ships `nft_tool` directly.
 
 ### Installed File Locations
 
@@ -946,6 +950,9 @@ Depends: blockhost-common (>= 0.1.0), libpam-web3-tools (>= 0.5.0), nodejs (>= 1
 | Signup generator | `/usr/bin/blockhost-generate-signup` |
 | Signup template | `/usr/share/blockhost/signup-template.html` |
 | Wizard plugin | `/usr/lib/python3/dist-packages/blockhost/engine_evm/` — PLANNED |
+| Crypto tool | `/usr/bin/nft_tool` |
+| NFT contract artifact | `/usr/share/blockhost/contracts/AccessCredentialNFT.json` |
+| NFT contract source | `/usr/share/blockhost/contracts/AccessCredentialNFT.sol` |
 | Contract source | `/opt/blockhost/contracts/BlockhostSubscriptions.sol` |
 | Contract artifact | `/usr/share/blockhost/contracts/BlockhostSubscriptions.json` |
 | Deploy scripts | `/opt/blockhost/scripts/deploy.ts`, `create-plan.ts` |
@@ -1053,12 +1060,54 @@ Same pattern as provisioner wizard plugin:
 | `get_summary_data(session)` | function | `-> dict` |
 | `get_summary_template()` | function | `-> str` |
 
+### Optional Exports (Wallet Page)
+
+| Export | Type | Signature | Purpose |
+|--------|------|-----------|---------|
+| `get_wallet_template()` | function | `-> Optional[str]` | Custom wallet connect template path (e.g. `"engine_evm/wallet.html"`) |
+| `validate_signature(sig)` | function | `str -> bool` | Signature format validation (called by installer on wallet POST and config restore) |
+| `decrypt_config(sig, ciphertext)` | function | `(str, str) -> dict` | Decrypt config backup file; returns parsed dict. Raise exception on failure |
+| `encrypt_config(sig, plaintext)` | function | `(str, str) -> str` | Encrypt config for backup download; returns hex ciphertext string. Raise exception on failure |
+
+If absent, the installer accepts any non-empty signature and falls back to `nft_tool` for encrypt/decrypt operations.
+
+### Wallet Page POST Contract
+
+Engine wallet templates MUST POST to the `wizard_wallet` endpoint with three form fields:
+
+| Field | Session key | Description |
+|-------|-------------|-------------|
+| `admin_wallet` | `admin_wallet` | Wallet address (format per engine's `validate_address()`) |
+| `admin_signature` | `admin_signature` | Signature bytes (format engine-specific) |
+| `public_secret` | `admin_public_secret` | The message that was signed |
+
+**Downstream consumers** of these session values:
+- `_gather_session_config()` — passes all three to finalization steps
+- `_finalize_complete()` — writes `admin_signature` to `/etc/blockhost/admin-signature.key`
+- Engine's `finalize_mint_nft()` — uses signature + public_secret for NFT credential encryption
+- `api_restore_config()` — uses signature for config backup decryption
+
+### Config Backup Contract
+
+**Decryption** (`decrypt_config`): Receives raw signature and ciphertext strings from the uploaded `.enc` file. Must return a parsed dict (YAML-decoded config). Raise an exception on failure — the installer catches it and returns a 400/500 to the client.
+
+**Encryption** (`encrypt_config`): Receives the admin signature and YAML-serialized config plaintext. Must return a hex ciphertext string suitable for download as a `.enc` file. The ciphertext must be decryptable by `decrypt_config` with the same signature.
+
+Without these exports, the installer falls back to shelling out to `nft_tool encrypt-symmetric` / `decrypt-symmetric`.
+
+### Crypto Tool Ownership
+
+The engine ships its own crypto CLI tool (EVM: `nft_tool`, a Python port of the former `pam_web3_tool`). The tool provides chain-specific crypto operations: keypair generation, ECIES encryption/decryption, symmetric encrypt/decrypt, and address derivation. Each engine ships the appropriate implementation for its chain's cryptographic primitives.
+
+The `libpam-web3-tools` package is deprecated — its contents (crypto binary, NFT contract artifacts) are now engine-owned.
+
 ### What Moves to Engine
 
 | Current location | Moves to |
 |-----------------|----------|
+| `installer/web/templates/wizard/wallet.html` | Engine wallet template (done) |
 | `installer/web/templates/wizard/blockchain.html` | Engine wizard template |
-| `installer/web/finalize.py` → `_finalize_keypair` | Engine finalization step |
+| `installer/web/finalize.py` → `_finalize_keypair` | Engine finalization step (done — uses `nft_tool`) |
 | `installer/web/finalize.py` → `_finalize_wallet` | Engine finalization step (calls `ab new server`) |
 | `installer/web/finalize.py` → `_finalize_contracts` | Engine finalization step (calls `blockhost-deploy-contracts`) |
 | `installer/web/finalize.py` → `_finalize_mint_nft` | Engine finalization step (calls `blockhost-mint-nft` + `bw set encrypt`) |
