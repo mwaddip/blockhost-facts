@@ -97,37 +97,35 @@ All commands are resolved through the manifest. The engine calls `getCommand("cr
 
 ### `create`
 
-The most complex command. Creates a VM, optionally mints an NFT.
+The most complex command. Creates a VM with cloud-init and GECOS configuration.
+
+The engine handles all NFT operations (reservation, encryption, minting). The provisioner receives the token ID and wallet address, bakes them into GECOS, creates the VM, and returns a JSON summary.
 
 **Actual signature:**
 ```
 blockhost-vm-create <name>
-    --owner-wallet <0x...>
+    --owner-wallet <address>
+    --nft-token-id <int>
+    [--expiry-days N]
     [--cpu N]
     [--memory N]
     [--disk N]
     [--apply]
     [--cloud-init-content <path>]
-    [--skip-mint]
-    [--no-mint]
-    [--user-signature <hex>]
-    [--public-secret <str>]
     [--mock]
 ```
 
 | Arg | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `name` | yes | — | VM name (positional). Used as primary key everywhere. |
-| `--owner-wallet` | yes | — | Wallet address (chain-agnostic format). Owner of the access NFT. |
+| `--owner-wallet` | yes | — | Wallet address (chain-agnostic format). Baked into GECOS as `wallet=ADDRESS`. |
+| `--nft-token-id` | yes | — | NFT token ID (reserved by engine). Baked into GECOS as `nft=TOKEN_ID`. |
+| `--expiry-days` | no | 30 | Days until VM expires. |
 | `--cpu` | no | 1 | vCPU count. |
 | `--memory` | no | 2048 | Memory in MB. |
 | `--disk` | no | 20 | Disk in GB. |
 | `--apply` | no | false | Actually create. Without this, dry-run (plan only). |
 | `--cloud-init-content` | no | — | Path to pre-rendered cloud-init YAML. If absent, provisioner renders its own using `blockhost.cloud_init.render_cloud_init()`. |
-| `--skip-mint` | no | false | Don't mint NFT (legacy flag). |
-| `--no-mint` | no | false | Don't mint NFT (engine handles minting separately). **This is the flag the engine uses.** |
-| `--user-signature` | no | — | User's wallet signature (hex). Enables encrypted connection details in NFT. |
-| `--public-secret` | no | — | Signed message (`libpam-web3:<address>:<nonce>`). Required with `--user-signature`. |
 | `--mock` | no | false | Use mock database. |
 
 **stdout on success (JSON):**
@@ -150,7 +148,7 @@ blockhost-vm-create <name>
 | `ip` | string | Assigned IPv4 address. |
 | `ipv6` | string | Assigned IPv6 address (may be empty if broker unavailable). |
 | `vmid` | int or string | Hypervisor-specific VM ID. Integer for Proxmox, domain name for libvirt. |
-| `nft_token_id` | int | Reserved NFT token ID (even if minting was skipped). |
+| `nft_token_id` | int | NFT token ID (echo of `--nft-token-id` input). |
 | `username` | string | SSH username created in the VM. |
 
 **The engine depends on:** `status`, `vm_name`, `ip`, `ipv6`, `vmid`, `nft_token_id`, `username`. All fields must be present.
@@ -562,7 +560,7 @@ The provisioner **declares** which keys it owns in the manifest. The installer w
 
 | File | Managed by | Provisioner reads |
 |------|-----------|-------------------|
-| `/etc/blockhost/web3-defaults.yaml` | Installer | `rpc_url`, `nft_contract`, `deployer_key_path` — for NFT minting |
+| `/etc/blockhost/web3-defaults.yaml` | Installer | `auth.otp_length`, `auth.otp_ttl_seconds` — for cloud-init template variables |
 | `/etc/blockhost/broker-allocation.json` | Broker client | `ipv6_prefix`, `gateway` — for IPv6 VM access |
 
 ### Config loading
@@ -603,7 +601,7 @@ Conflicts: blockhost-provisioner-proxmox
 ### Dependencies
 
 ```
-Depends: python3 (>= 3.10), blockhost-common (>= 0.1.0), libpam-web3-tools (>= 0.5.0)
+Depends: python3 (>= 3.10), blockhost-common (>= 0.1.0)
 Recommends: <hypervisor-specific packages>
 ```
 

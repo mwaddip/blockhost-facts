@@ -366,48 +366,30 @@ The deployer/server wallet is generated interactively through the wizard UI (whi
 
 ### `blockhost-mint-nft`
 
-**Installed:** `/usr/bin/blockhost-mint-nft` (Python script)
-**Python module:** `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` (importable as `from blockhost.mint_nft import mint_nft`)
+**Installed:** `/usr/bin/blockhost-mint-nft`
 
 ```
 blockhost-mint-nft \
-  --owner-wallet <0x...> \
-  --machine-id <vm-name> \
+  --owner-wallet <address> \
   [--user-encrypted <hex>] \
-  [--public-secret <string>] \
   [--dry-run]
 ```
 
 | Arg | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `--owner-wallet` | yes | — | Ethereum address to receive NFT |
-| `--machine-id` | yes | — | VM name (used in NFT description) |
-| `--user-encrypted` | no | `0x` | Hex-encoded encrypted connection details |
-| `--public-secret` | no | `""` | Message user signed (`libpam-web3:<address>:<nonce>`) |
-| `--dry-run` | no | false | Print cast command without executing |
+| `--owner-wallet` | yes | — | Wallet address to receive NFT (chain-agnostic format) |
+| `--user-encrypted` | no | `""` | Hex-encoded encrypted connection details |
+| `--dry-run` | no | false | Simulate without broadcasting |
 
-**Config:** `load_web3_config()` → `deployer.private_key_file`, `blockchain.nft_contract`, `blockchain.rpc_url`
+**Config:** `web3-defaults.yaml` → `blockchain.nft_contract`, `blockchain.rpc_url`. Deployer key from env or `/etc/blockhost/deployer.mnemonic` (OPNet) / `deployer.key` (EVM).
 
-**Implementation:** Shells out to Foundry `cast send` with the NFT contract's `mint()` function.
-
-**Python function signature:**
-```python
-def mint_nft(
-    owner_wallet: str,
-    machine_id: str,
-    user_encrypted: str = "0x",
-    public_secret: str = "",
-    config: dict = None,       # Override for load_web3_config()
-    dry_run: bool = False,
-) -> dict:
-    """Returns {"success": True, "tx_hash": "0x..."} or {"success": False, "error": "..."}"""
-```
+**Implementation:** Calls `mint(address, userEncrypted)` on the AccessCredentialNFT contract (2 params). Returns the minted token ID on stdout.
 
 **Consumers:**
-- Monitor event handler (CLI: `blockhost-mint-nft --owner-wallet ... --machine-id ...`)
-- `installer/web/finalize.py` (Python import: `from blockhost.mint_nft import mint_nft`)
+- Monitor event handler (CLI: `blockhost-mint-nft --owner-wallet ... --user-encrypted ...`)
+- Engine wizard `finalize_mint_nft()` (CLI call)
 
-**Exit:** 0/1.
+**Exit:** 0/1. stdout = token ID on success.
 
 ---
 
@@ -606,11 +588,14 @@ The monitor is the adapter boundary between the chain and the provisioner. It tr
 **`SubscriptionCreated`:**
 1. Format VM name: `blockhost-NNN` (3-digit zero-padded subscription ID)
 2. Calculate expiry days from `expiresAt` timestamp
-3. Call provisioner: `blockhost-vm-create blockhost-NNN --owner-wallet <subscriber> --no-mint --apply`
-4. Parse JSON output from provisioner (ip, vmid, nft_token_id, username)
-5. Decrypt `userEncrypted` using server private key
-6. Call: `blockhost-mint-nft --owner-wallet <subscriber> --machine-id blockhost-NNN --user-encrypted <encrypted_details> --public-secret <secret>`
-7. Mark NFT minted in database
+3. Reserve NFT token ID: query `totalSupply()` on NFT contract, call `db.reserve_nft_token_id(vmName, tokenId)`
+4. Call provisioner: `blockhost-vm-create blockhost-NNN --owner-wallet <subscriber> --nft-token-id <N> --expiry-days <days> --apply`
+5. Parse JSON output from provisioner (ip, vmid, nft_token_id, username)
+6. Decrypt `userEncrypted` using server private key
+7. Encrypt connection details (hostname, port, username) using decrypted user signature
+8. Call: `blockhost-mint-nft --owner-wallet <subscriber> --user-encrypted <encrypted_details>`
+9. Mark NFT minted in database
+On provisioner failure at step 4: call `db.mark_nft_failed(tokenId)` to release the reservation.
 
 **`SubscriptionExtended`:**
 1. Calculate additional days
@@ -1084,7 +1069,7 @@ Engine wallet templates MUST POST to the `wizard_wallet` endpoint with three for
 **Downstream consumers** of these session values:
 - `_gather_session_config()` — passes all three to finalization steps
 - `_finalize_complete()` — writes `admin_signature` to `/etc/blockhost/admin-signature.key`
-- Engine's `finalize_mint_nft()` — uses signature + public_secret for NFT credential encryption
+- Engine's `finalize_mint_nft()` — uses signature for NFT credential encryption (symmetric key derived from signature)
 - `api_restore_config()` — uses signature for config backup decryption
 
 ### Config Backup Contract
@@ -1197,7 +1182,7 @@ Chain-specific finalization steps move to engine wizard plugin (§10). The insta
 
 ### `mint_nft.py` dual install path (OPEN)
 
-Installed as both `/usr/bin/blockhost-mint-nft` (CLI) and `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` (importable module). The monitor calls it as a CLI; the installer imports it as Python. Both paths must work. With the engine wizard plugin, the Python import path is used by the engine's own finalization step (same submodule), reducing the cross-boundary concern.
+Installed as `/usr/bin/blockhost-mint-nft` (CLI). The monitor calls it as a CLI; the engine wizard finalization calls it as a CLI. The EVM engine also installs it as `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` (importable module). The OPNet engine's mint script is TypeScript (`npx tsx`).
 
 ### Hardcoded chain configs in `chain-pools.ts` (OPEN)
 

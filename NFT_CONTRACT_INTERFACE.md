@@ -18,8 +18,8 @@ details (IP, username) that only the server can decrypt.
 **Auth-time usage:** None. PAM verifies signatures against GECOS-stored wallet addresses.
 The reconciler syncs NFT ownership to GECOS asynchronously. No contract queries at login.
 
-**Provision-time usage:** Monitor calls `mint()` after VM creation. Provisioner reserves
-token ID, monitor mints with encrypted connection details.
+**Provision-time usage:** Engine reserves token ID, calls provisioner to create VM, then
+calls `mint()` with encrypted connection details.
 
 ---
 
@@ -31,7 +31,7 @@ Functions that both implementations provide with equivalent semantics.
 
 | Function | Purpose |
 |----------|---------|
-| `mint(...)` | Mint credential NFT to recipient (signature differs — see §5) |
+| `mint(to, userEncrypted)` | Mint credential NFT to recipient (2 params) |
 | `updateUserEncrypted(tokenId, data)` | Update encrypted connection details |
 
 ### Public (Read-Only)
@@ -42,39 +42,26 @@ Functions that both implementations provide with equivalent semantics.
 | `balanceOf(address)` | `uint256` | NFT count for wallet |
 | `totalSupply()` | `uint256` | Total minted tokens (OPNet: minus burned) |
 | `tokenOfOwnerByIndex(address, index)` | `uint256` | Token ID by owner index |
+| `getUserEncrypted(tokenId)` | `bytes`/`string` | Encrypted connection details |
 
 ---
 
 ## 3. EVM-Specific
 
-### Storage (AccessData Struct)
+### Storage
 
 ```solidity
-struct AccessData {
-    bytes userEncrypted;           // ECIES-encrypted connection details (AES-GCM)
-    string publicSecret;           // Key derivation message: "libpam-web3:<address>:<nonce>"
-    string description;            // Human-readable (e.g., "Production Server Access")
-    string imageUri;               // IPFS or HTTPS image (empty → default)
-    string animationUrlBase64;     // Signing page HTML (raw base64, NOT data URI)
-    uint256 issuedAt;              // Block timestamp at mint
-    uint256 expiresAt;             // Expiration (0 = never)
-}
+mapping(uint256 => bytes) private _userEncrypted;  // ECIES-encrypted connection details per token
 ```
+
+No metadata fields. `publicSecret` is a host config value (`blockhost.yaml`), not stored per-token.
 
 ### Functions (EVM Only)
 
 | Function | Modifier | Purpose |
 |----------|----------|---------|
-| `mint(to, userEncrypted, publicSecret, description, imageUri, animationUrlBase64, expiresAt)` | onlyOwner | Full mint with metadata (7 params) |
-| `mintBatch(recipients[], ...)` | onlyOwner | Batch mint (all arrays must equal length) |
-| `updateExpiration(tokenId, newExpiration)` | onlyOwner | Extend credential validity |
-| `updateAnimationUrl(tokenId, base64)` | onlyOwner | Update per-token signing page |
-| `setDefaultImageUri(uri)` | onlyOwner | Contract-wide default image |
-| `getAccessData(tokenId)` | view | Returns `(userEncrypted, publicSecret, issuedAt, expiresAt)` |
-| `getPublicSecret(tokenId)` | view | Returns `publicSecret` string |
-| `isExpired(tokenId)` | view | `true` if `expiresAt != 0 && now > expiresAt` |
-| `tokenURI(tokenId)` | view | On-chain JSON metadata (base64 data URI) |
-| `tokenByIndex(index)` | view | Global enumeration |
+| `getUserEncrypted(tokenId)` | view | Returns `bytes` encrypted connection details |
+| `tokenByIndex(index)` | view | Global enumeration (inherited ERC721Enumerable) |
 
 ### Inherited ERC721 (EVM)
 
@@ -89,8 +76,8 @@ Standard OpenZeppelin ERC721 + Enumerable + Ownable:
 
 | Event | Fields | Emitted |
 |-------|--------|---------|
-| `CredentialMinted` | `indexed tokenId, indexed recipient, issuedAt, expiresAt` | On mint |
-| `CredentialUpdated` | `indexed tokenId` | On updateUserEncrypted/Expiration/AnimationUrl |
+| `CredentialMinted` | `indexed tokenId, indexed recipient` | On mint |
+| `CredentialUpdated` | `indexed tokenId` | On updateUserEncrypted |
 | `Transfer` | `indexed from, indexed to, indexed tokenId` | Inherited ERC721 (mint/burn/transfer) |
 | `Approval` | `indexed owner, indexed approved, indexed tokenId` | On approve() |
 | `ApprovalForAll` | `indexed owner, indexed operator, approved` | On setApprovalForAll() |
@@ -135,20 +122,15 @@ Single event covers all ownership changes. Mint: `from = address(0)`. Burn: `to 
 
 | Aspect | EVM | OPNet |
 |--------|-----|-------|
-| **mint signature** | `mint(address, bytes, string, string, string, string, uint256)` — 7 params | `mint(address, string)` — 2 params |
-| **mint selector** | `0xd204c45e` | `0x066b1ee9` |
-| **publicSecret** | Stored per token, returned by `getAccessData()` and `getPublicSecret()` | Removed — ML-DSA replaces sign-publicSecret key derivation |
-| **getAccessData** | Returns `(userEncrypted, publicSecret, issuedAt, expiresAt)` | Removed — use `getUserEncrypted()` |
-| **getUserEncrypted** | Not present (use `getAccessData`) | Returns `string` for single token |
-| **updateUserEncrypted type** | `(uint256, bytes)` — binary data | `(uint256, string)` — string data |
-| **Expiration** | Per-token `expiresAt`, `isExpired()`, `updateExpiration()` | Not implemented |
-| **Metadata** | `description`, `imageUri`, `animationUrlBase64`, `tokenURI()` | Not implemented |
-| **Batch mint** | `mintBatch()` | Not implemented |
+| **mint signature** | `mint(address, bytes)` | `mint(address, string)` |
+| **userEncrypted type** | `bytes` | `string` |
+| **updateUserEncrypted type** | `(uint256, bytes)` | `(uint256, string)` |
+| **getUserEncrypted return** | `bytes` | `string` |
 | **Transfer** | Inherited ERC721 (`transferFrom`, `safeTransferFrom`) | Custom `transfer()` and `transferFrom()` |
 | **Burn** | Not implemented (inherited ERC721 has no burn) | `burn(tokenId)` — owner or approved |
 | **totalSupply** | Minted count (ERC721Enumerable) | Minted minus burned |
 | **Transfer event** | Inherited `Transfer(from, to, tokenId)` | Custom `Transferred(from, to, tokenId)` |
-| **Encryption** | ECIES (secp256k1) + AES-GCM via publicSecret key derivation | ML-DSA (post-quantum) |
+| **Encryption** | ECIES (secp256k1) + AES-GCM | ML-DSA (post-quantum) |
 | **Base** | OpenZeppelin ERC721 + Enumerable + Ownable | Custom OP_NET implementation |
 
 ---
@@ -158,16 +140,9 @@ Single event covers all ownership changes. Mint: `from = address(0)`. Burn: `to 
 ### EVM
 
 ```
-mint(address,bytes,string,string,string,string,uint256)  → 0xd204c45e
-mintBatch(...)                                            → 0xb71d3f55
+mint(address,bytes)                                       → (recompute after contract rewrite)
 updateUserEncrypted(uint256,bytes)                        → 0x73f2ccc8
-updateExpiration(uint256,uint256)                         → 0x3a2a3e1f
-updateAnimationUrl(uint256,string)                        → 0x40f3b0e1
-setDefaultImageUri(string)                                → 0xb13fbeb7
-getAccessData(uint256)                                    → 0xbe3e7b20
-getPublicSecret(uint256)                                  → 0xfc49c0ea
-isExpired(uint256)                                        → 0x2efb2c55
-tokenURI(uint256)                                         → 0xc87b56dd
+getUserEncrypted(uint256)                                 → (recompute after contract rewrite)
 ```
 
 Standard ERC721/Enumerable/Ownable selectors omitted — use OpenZeppelin reference.
@@ -207,20 +182,12 @@ getAccessData(uint256)                                    → 0x77c265de
 
 | Consumer | Operations | Notes |
 |----------|-----------|-------|
-| Monitor (mint handler) | `mint()` | Called after VM creation. Passes `userEncrypted` with ECIES-encrypted connection details |
-| Monitor (reconciler) | `ownerOf()`, `totalSupply()` | Periodic ownership verification, GECOS sync |
-| Provisioner (mint script) | `mint()` | Via `blockhost-mint-nft` CLI or Python import |
+| Engine (handler) | `mint()` | Called after VM creation. Passes `userEncrypted` with encrypted connection details |
+| Engine (handler) | `totalSupply()` | Token ID reservation floor before provisioning |
+| Engine (reconciler) | `ownerOf()`, `totalSupply()` | Periodic ownership verification, GECOS sync |
+| Engine (`bw set encrypt`) | `updateUserEncrypted()` | Update connection details post-creation |
 | Admin panel | `ownerOf()` via `bw who` | Admin NFT ownership check for auth |
 | Installer validation | `totalSupply()` via `is contract` | Contract liveness check |
-
-### EVM-Specific Consumers
-
-| Consumer | Operations | Notes |
-|----------|-----------|-------|
-| Monitor (mint handler) | `getAccessData()` | Reads back publicSecret after mint for verification |
-| Signup page (JS) | `tokenURI()` | Display credential metadata in wallet/marketplace |
-| Monitor (reconciler) | `getPublicSecret()` | Key derivation path verification |
-| Engine finalization | `updateUserEncrypted()`, `updateExpiration()` | Post-setup metadata updates |
 
 ### OPNet-Specific Consumers
 
@@ -238,10 +205,10 @@ getAccessData(uint256)                                    → 0x77c265de
 ### EVM
 
 ```solidity
-constructor(string name, string symbol, string defaultImageUri)
+constructor(string name, string symbol)
 ```
 
-Deploys with token name, symbol, and default image URI. Owner = `msg.sender`.
+Deploys with token name and symbol. Owner = `msg.sender`.
 
 ### OPNet
 
