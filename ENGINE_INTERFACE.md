@@ -393,45 +393,6 @@ blockhost-mint-nft \
 
 ---
 
-### `blockhost-init` — DEPRECATION PLANNED
-
-**Installed:** `/usr/bin/blockhost-init` (bash script)
-
-> **Planned:** Wallet generation responsibilities move to `ab new server` (called by wizard UI)
-> and `ab --init` (non-interactive bootstrap). Server ECIES key generation (not a wallet —
-> used for userEncrypted decryption and admin command decryption) remains as a distinct
-> operation, either retained in a slimmed-down `blockhost-init` or moved to engine wizard
-> finalization. Config file initialization (`blockhost.yaml`, `vms.json`) moves to engine
-> wizard finalization steps.
-
-```
-sudo blockhost-init \
-  [--public-secret <message>] \
-  [--deployer-key <0x...>] \
-  [--deployer-key-file <path>] \
-  [--help]
-```
-
-| Arg | Required | Default | Description |
-|-----|----------|---------|-------------|
-| `--public-secret` | no | `blockhost-access` | Static message users sign for auth |
-| `--deployer-key` | no | — | Use existing private key (hex, strips `0x`) |
-| `--deployer-key-file` | no | — | Read key from file |
-
-**Must run as root.** One-time server initialization:
-
-1. Generate server secp256k1 keypair → `/etc/blockhost/server.key` (chmod 600)
-2. Generate or import deployer keypair → `/etc/blockhost/deployer.key` (chmod 600)
-3. Derive deployer address via `cast wallet address`
-4. Write `/etc/blockhost/blockhost.yaml` (public_secret, server_public_key, deployer_address, contract_address="")
-5. Initialize `/var/lib/blockhost/vms.json` (empty database)
-
-**Prerequisites:** `nft_tool`, `cast` (Foundry), `/etc/blockhost/`, `/var/lib/blockhost/`
-
-**stdout:** Server public key, deployer address, public secret.
-**Exit:** 0/1.
-**Consumers:** `scripts/first-boot.sh`
-
 ---
 
 ### `blockhost-generate-signup`
@@ -931,7 +892,6 @@ Conflicts: libpam-web3-tools
 | Contract deployer | `/usr/bin/blockhost-deploy-contracts` — PLANNED |
 | NFT minter (Python) | `/usr/bin/blockhost-mint-nft` |
 | NFT minter (module) | `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` |
-| Init script | `/usr/bin/blockhost-init` — DEPRECATION PLANNED |
 | Signup generator | `/usr/bin/blockhost-generate-signup` |
 | Signup template | `/usr/share/blockhost/signup-template.html` |
 | Wizard plugin | `/usr/lib/python3/dist-packages/blockhost/engine_evm/` — PLANNED |
