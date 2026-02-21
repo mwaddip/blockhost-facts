@@ -90,7 +90,7 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
-| `reserve_nft_token_id` | `(vm_name, token_id=None)` | `int` | Auto-allocates if token_id is None |
+| `reserve_nft_token_id` | `(vm_name, token_id=None)` | `int` | Auto-allocates if token_id is None. Raises `ValueError` if token_id already reserved (status != "failed"). |
 | `mark_nft_minted` | `(token_id, owner_wallet)` | `None` | Records successful mint |
 | `mark_nft_failed` | `(token_id)` | `None` | Marks reservation as failed |
 | `get_nft_token` | `(token_id)` | `Optional[dict]` | Lookup by token ID |
@@ -131,11 +131,26 @@ NFT tokens are tracked in a separate top-level `reserved_nft_tokens` map in the 
 }
 ```
 
+### Locking Model
+
+Production (`VMDatabase`) uses a separate lockfile at `{db_file}.lock` to avoid the truncation-before-lock problem (`open("w")` truncates before `fcntl.flock()` runs on the same fd).
+
+| Method | Lock | Purpose |
+|--------|------|---------|
+| `_atomic_update(mutator)` | Exclusive on lockfile | All mutations. Acquires lock → reads DB → calls `mutator(db_dict)` → writes via temp+rename → releases lock. Single critical section eliminates TOCTOU. |
+| `_read_db()` | Shared on DB file | Read-only access for non-mutating methods (`get_vm`, `list_vms`, `get_expired_vms`, etc.) |
+| `_read_db_unlocked()` | None (internal) | Called within `_atomic_update` only — lock already held |
+| `_write_db_unlocked()` | None (internal) | Atomic write via temp file + rename. Called within `_atomic_update` only. |
+
+`_atomic_update` is abstract on `VMDatabaseBase`. `VMDatabase` implements it with `fcntl.LOCK_EX` on the lockfile. `MockVMDatabase` implements it as a passthrough (read → mutate → write, no locking).
+
+All 13 mutating methods in the base class use `_atomic_update`: `register_vm`, `mark_suspended`, `mark_active`, `mark_destroyed`, `allocate_ip`, `allocate_ipv6`, `allocate_vmid`, `extend_expiry`, `reserve_nft_token_id`, `mark_nft_minted`, `mark_nft_failed`. Plus `release_ip` and `release_ipv6` on `VMDatabase`.
+
 ### Storage
 
-- Production: JSON file with `fcntl` file locking at path from `db.yaml` → `db_file`
-- Default: `/var/lib/blockhost/vms.json`
-- Mock: in-memory, no file I/O
+- Production: JSON file at path from `db.yaml` → `db_file`, lockfile at `{db_file}.lock`
+- Default: `/var/lib/blockhost/vms.json` (lockfile: `vms.json.lock`)
+- Mock: in-memory, no file locking
 
 ---
 

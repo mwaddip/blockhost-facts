@@ -539,24 +539,19 @@ The monitor is the adapter boundary between the chain and the provisioner. It tr
 2. Decode events against contract ABI
 3. Dispatch to event handlers (see below)
 4. Process admin commands (if configured)
-5. Periodic tasks (on their own intervals):
+5. Periodic tasks (on their own intervals, all `await`ed, all guarded by `isPipelineBusy()`):
    - **Reconciliation:** every 5 minutes
    - **Fund cycle:** every 24 hours (configurable)
    - **Gas check:** every 30 minutes (configurable)
+
+**Pipeline integration:** After processing block events, the monitor checks `isPipelineBusy()` before launching reconciliation, fund cycle, or gas check. All three are `await`ed (not `.catch()` fire-and-forget). This eliminates concurrent DB access between handlers and background tasks. On startup, the monitor initializes the token counter (if `next_token_id == -1`) and resumes any incomplete pipeline from a previous run.
 
 ### Event Handlers
 
 **`SubscriptionCreated`:**
 1. Format VM name: `blockhost-NNN` (3-digit zero-padded subscription ID)
 2. Calculate expiry days from `expiresAt` timestamp
-3. Reserve NFT token ID: query `totalSupply()` on NFT contract, call `db.reserve_nft_token_id(vmName, tokenId)`
-4. Call provisioner: `blockhost-vm-create blockhost-NNN --owner-wallet <subscriber> --nft-token-id <N> --expiry-days <days> --apply`
-5. Parse JSON output from provisioner (ip, vmid, nft_token_id, username)
-6. Decrypt `userEncrypted` using server private key
-7. Encrypt connection details (hostname, port, username) using decrypted user signature
-8. Call: `blockhost-mint-nft --owner-wallet <subscriber> --user-encrypted <encrypted_details>`
-9. Mark NFT minted in database
-On provisioner failure at step 4: call `db.mark_nft_failed(tokenId)` to release the reservation.
+3. Enqueue to pipeline: creates or queues a pipeline entry. If no pipeline is active, execution starts immediately. The pipeline handles all subsequent stages (token reservation, VM creation, encryption, minting, DB update) with persistent state and automatic retry. See §11 for full stage definitions.
 
 **`SubscriptionExtended`:**
 1. Calculate additional days
@@ -571,7 +566,7 @@ Log only (informational).
 
 ### NFT Reconciliation
 
-**Interval:** 5 minutes. **Guards:** skips if provisioning in progress (`pgrep` for create command or lock file).
+**Interval:** 5 minutes. **Guards:** skips if `isPipelineBusy()` returns true (replaces former `pgrep` check). Also performs token counter drift correction: compares `next_token_id` in `pipeline.json` with on-chain `totalSupply()` and corrects upward if the chain has more tokens.
 
 Verifies local `vms.json` NFT state matches on-chain:
 - Checks for tokens that exist on-chain but aren't marked minted locally
@@ -754,6 +749,7 @@ admin:
 
 | File | What | Written by |
 |------|------|-----------|
+| `/var/lib/blockhost/pipeline.json` | Pipeline state: active entry, queue, token counter, history | Pipeline executor (monitor) |
 | `/var/lib/blockhost/fund-manager-state.json` | Last run timestamps, hot wallet status | Fund-manager |
 | `/var/lib/blockhost/vms.json` | VM database (NFT reconciliation updates) | Reconcile module |
 | `/etc/blockhost/addressbook.json` | Hot wallet entry (via root agent) | Fund-manager, ab CLI |
@@ -1070,7 +1066,75 @@ The `libpam-web3-tools` package is deprecated — its contents (crypto binary, N
 
 ---
 
-## 12. Auth Service Ownership
+## 11. Subscription Pipeline
+
+The subscription handler uses a pipeline state machine with defined stages, persistent state, automatic retry, and crash recovery. All subscription-create operations are serialized through a single pipeline — no concurrent provisioning or minting.
+
+### State File
+
+**Location:** `/var/lib/blockhost/pipeline.json`
+**Owner:** `blockhost:blockhost`
+**Written by:** Pipeline executor (monitor process)
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `next_token_id` | `number` | Local counter replacing `totalSupply()` queries. `-1` = needs initialization from chain. |
+| `active` | `PipelineEntry \| null` | Currently executing pipeline entry |
+| `queue` | `QueuedEvent[]` | Subscription events waiting for active pipeline to finish |
+| `pipeline_busy` | `boolean` | Blocks reconciler and fund-manager when true |
+| `history` | `CompletedPipeline[]` | Last 50 completed pipelines (debugging/auditing) |
+
+### Pipeline Stages
+
+Each stage name represents a completed action. Resume executes the *next* stage after the last completed one.
+
+```
+received → decrypted → token_reserved → vm_created → encrypted → nft_minted → db_updated → complete
+```
+
+| Stage | Action | Timeout |
+|-------|--------|---------|
+| `received` | Event parsed, pipeline entry created | — |
+| `decrypted` | `userEncrypted` decrypted to user signature via server private key | 10s |
+| `token_reserved` | Local `next_token_id` incremented and persisted, `reserveNftTokenId()` called in common DB | 10s |
+| `vm_created` | Provisioner `create` command executed, JSON summary parsed (ip, vmid, username) | 10min |
+| `encrypted` | Connection details encrypted with user's signature (symmetric AES-GCM) | 10s |
+| `nft_minted` | `blockhost-mint-nft` executed, actual token ID parsed from stdout and compared with reserved | 15min (OPNet block time) |
+| `db_updated` | `markNftMinted()` awaited (not fire-and-forget). If token ID mismatch: reservation corrected in DB, GECOS updated via provisioner `update-gecos` | 10s |
+| `complete` | Entry moved to `history`, `pipeline_busy` cleared, queue drained | — |
+
+### Token ID Management
+
+The engine maintains a local `next_token_id` counter in `pipeline.json`, replacing the previous `totalSupply()` query on every subscription. This eliminates the race where a mint is broadcast but not yet confirmed, causing the next handler to read stale supply.
+
+- **Initialization:** On first startup (`next_token_id == -1`), query `totalSupply()` once and set the counter.
+- **Increment:** `token_reserved` stage increments the counter and persists immediately.
+- **Drift correction:** The reconciler compares `next_token_id` with on-chain `totalSupply()` every 5 minutes. If the chain has more tokens (external mints, admin actions), the counter is corrected upward. Never corrected downward.
+- **Mismatch detection:** After minting, the actual token ID from `blockhost-mint-nft` stdout is compared with the reserved ID. If they differ, the `db_updated` stage: (1) marks the old reservation as failed, (2) creates a new reservation with the actual ID and marks it minted, (3) calls provisioner `update-gecos` to fix the VM's GECOS field.
+
+### Concurrency Control
+
+- **Pipeline serialization:** Only one `active` pipeline at a time. New `SubscriptionCreated` events are pushed to `queue` and drained sequentially after the active pipeline completes.
+- **Background task blocking:** When `pipeline_busy == true`, the monitor skips reconciliation, fund cycles, and gas checks. All three are `await`ed (not `.catch()` fire-and-forget) and guarded by `isPipelineBusy()`.
+- **Crash recovery:** On monitor startup, if `active != null`, the pipeline resumes from the next stage after the last completed one.
+
+### Retry
+
+Exponential backoff: 5s base, doubling per attempt, max 3 retries per stage. After exhausting retries, the pipeline stops at the failed stage (`pipeline_busy` set to `false` so background tasks resume). Manual intervention required to advance or abort.
+
+On VM create failure after token reservation: the reservation is marked failed (`mark_nft_failed`) only on final retry exhaustion, not on individual retry failures.
+
+### Serialization with Other Event Types
+
+`SubscriptionExtended` and `SubscriptionCancelled` do NOT go through the pipeline — they're simple DB updates and provisioner calls with no multi-step state to protect. They continue to be handled inline by the monitor.
+
+### Both-Engines-Must-Implement
+
+Both `blockhost-engine` (EVM) and `blockhost-engine-opnet` (OPNet) must implement this pipeline with the same stage names and state file schema. Chain-specific differences: timeouts (EVM ~12s block time → shorter mint timeout), provider library (ethers vs opnet), transaction model (nonce vs UTXO).
+
+---
+
+## 13. Auth Service Ownership
 
 The signing page HTTPS server (`web3-auth-svc`) is **engine-owned**. Signature processing is chain-specific (EVM uses ecrecover, OPNet validates OTP + wallet address), so the engine ships the auth-svc binary, signing page HTML, and systemd unit.
 
@@ -1120,7 +1184,7 @@ The `nft-auth.yaml` template still writes the auth-svc config and enables the se
 
 ---
 
-## 13. Known Issues & Abstraction Debt
+## 14. Known Issues & Abstraction Debt
 
 ### ~~`cast` used directly by installer and admin~~ (PLANNED)
 
