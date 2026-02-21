@@ -147,6 +147,18 @@ default (submodule)       S8  P10 E7  C5  I8  A8  L7
   Authentication boundary. This is the lock on the door.
 ```
 
+### blockhost-runner
+
+```
+default (submodule)       S8  P7  E10 C6  I9  A7  L9
+  Crash-recovery state machine that serializes subscription processing.
+  If this loses state mid-pipeline, VMs get orphaned and tokens get double-minted.
+  Endurance is maxed — surviving crashes IS the product. Luck is near-max because
+  race conditions and timing are the entire threat model. Intelligence is high
+  because the moment engine-specific logic leaks through the strategy boundary,
+  we're back to copy-pasting state machines into every engine.
+```
+
 ### blockhost-broker
 
 ```
