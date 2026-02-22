@@ -96,8 +96,8 @@ src/is/                   S7  P7  E5  C7  I6  A7  L5
 src/auth-svc/             S7  P9  E8  C5  I7  A7  L7
   Auth boundary on VMs. Must not crash, must not leak.
 
-scripts/nft_tool.py       S7  P9  E6  C6  I7  A8  L6
-  Crypto CLI (EVM engine only). Key handling and correctness are non-negotiable.
+bhcrypt                   S7  P9  E6  C6  I7  A8  L6
+  Crypto CLI. Key handling and correctness are non-negotiable.
 ```
 
 ### blockhost-provisioner-proxmox
