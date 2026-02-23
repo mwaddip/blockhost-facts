@@ -318,7 +318,7 @@ Update address for existing entry. Preserves `keyfile` field if present.
 ab new <name>
 ```
 
-Generate new secp256k1 keypair via `nft_tool generate-keypair`. Saves private key to `/etc/blockhost/<name>.key` (chmod 600), adds entry to addressbook with `keyfile` field.
+Generate new secp256k1 keypair via `bhcrypt generate-keypair`. Saves private key to `/etc/blockhost/<name>.key` (chmod 600), adds entry to addressbook with `keyfile` field.
 
 **Consumers:** `admin/system.py` (`_run_ab(["new", name])`)
 
@@ -551,7 +551,15 @@ The monitor is the adapter boundary between the chain and the provisioner. It tr
 **`SubscriptionCreated`:**
 1. Format VM name: `blockhost-NNN` (3-digit zero-padded subscription ID)
 2. Calculate expiry days from `expiresAt` timestamp
-3. Enqueue to pipeline: creates or queues a pipeline entry. If no pipeline is active, execution starts immediately. The pipeline handles all subsequent stages (token reservation, VM creation, encryption, minting, DB update) with persistent state and automatic retry. See §11 for full stage definitions.
+3. Decrypt `userEncrypted` using server private key (ECIES)
+4. Call provisioner: `blockhost-vm-create blockhost-NNN --owner-wallet <subscriber> --expiry-days <days> --apply`
+5. Parse JSON output from provisioner (ip, vmid, username)
+6. Encrypt connection details (hostname, port, username) using decrypted user signature (symmetric)
+7. Call: `blockhost-mint-nft --owner-wallet <subscriber> --user-encrypted <encrypted_details>` → capture token ID from stdout
+8. Call provisioner: `blockhost-vm-update-gecos blockhost-NNN <subscriber> --nft-id <actual_token_id>`
+9. Mark NFT minted in database (`await` — never fire-and-forget)
+
+No token reservation. The actual minted token ID comes from `blockhost-mint-nft` stdout, then gets baked into GECOS via `update-gecos`.
 
 **`SubscriptionExtended`:**
 1. Calculate additional days
@@ -569,8 +577,8 @@ Log only (informational).
 **Interval:** 5 minutes. **Guards:** skips if `isPipelineBusy()` returns true (replaces former `pgrep` check). Also performs token counter drift correction: compares `next_token_id` in `pipeline.json` with on-chain `totalSupply()` and corrects upward if the chain has more tokens.
 
 Verifies local `vms.json` NFT state matches on-chain:
-- Checks for tokens that exist on-chain but aren't marked minted locally
-- Checks `reserved_nft_tokens` map for un-minted reservations
+- Checks for VMs with `nft_minted: false` that have NFTs on-chain (ownership match by wallet)
+- Updates GECOS via `update-gecos` if NFT token ID is missing or wrong
 - Fixes discrepancies by marking tokens as minted (via Python `blockhost.vm_db` or direct JSON update)
 - **Syncs NFT ownership to VM GECOS fields:** When an NFT transfer is detected (owner address on-chain differs from `owner_wallet` in vms.json), the reconciler: (1) updates `owner_wallet` in vms.json, (2) calls provisioner `update-gecos` command to update the VM's GECOS field. Failed GECOS updates are tracked via `gecos_synced` flag and retried on subsequent cycles. This is the sole mechanism by which VMs learn about ownership changes. libpam-web3 verifies signatures against the GECOS-stored wallet address — no chain queries at auth time.
 
@@ -872,7 +880,7 @@ Provides: pam-web3-tool
 Conflicts: libpam-web3-tools
 ```
 
-> `libpam-web3-tools` is deprecated. The engine package ships `nft_tool` directly.
+> `libpam-web3-tools` is deprecated. The engine package ships `bhcrypt` directly.
 
 ### Installed File Locations
 
@@ -891,7 +899,7 @@ Conflicts: libpam-web3-tools
 | Signup generator | `/usr/bin/blockhost-generate-signup` |
 | Signup template | `/usr/share/blockhost/signup-template.html` |
 | Wizard plugin | `/usr/lib/python3/dist-packages/blockhost/engine_evm/` — PLANNED |
-| Crypto tool | `/usr/bin/nft_tool` |
+| Crypto tool | `/usr/bin/bhcrypt` |
 | NFT contract artifact | `/usr/share/blockhost/contracts/AccessCredentialNFT.json` |
 | NFT contract source | `/usr/share/blockhost/contracts/AccessCredentialNFT.sol` |
 | Contract source | `/opt/blockhost/contracts/BlockhostSubscriptions.sol` |
@@ -1010,7 +1018,7 @@ Same pattern as provisioner wizard plugin:
 | `decrypt_config(sig, ciphertext)` | function | `(str, str) -> dict` | Decrypt config backup file; returns parsed dict. Raise exception on failure |
 | `encrypt_config(sig, plaintext)` | function | `(str, str) -> str` | Encrypt config for backup download; returns hex ciphertext string. Raise exception on failure |
 
-If absent, the installer accepts any non-empty signature and falls back to `nft_tool` for encrypt/decrypt operations.
+If absent, the installer accepts any non-empty signature and falls back to `bhcrypt` for encrypt/decrypt operations.
 
 ### Wallet Page POST Contract
 
@@ -1034,11 +1042,11 @@ Engine wallet templates MUST POST to the `wizard_wallet` endpoint with three for
 
 **Encryption** (`encrypt_config`): Receives the admin signature and YAML-serialized config plaintext. Must return a hex ciphertext string suitable for download as a `.enc` file. The ciphertext must be decryptable by `decrypt_config` with the same signature.
 
-Without these exports, the installer falls back to shelling out to `nft_tool encrypt-symmetric` / `decrypt-symmetric`.
+Without these exports, the installer falls back to shelling out to `bhcrypt encrypt-symmetric` / `decrypt-symmetric`.
 
 ### Crypto Tool Ownership
 
-The engine ships its own crypto CLI tool (EVM: `nft_tool`, a Python port of the former `pam_web3_tool`). The tool provides chain-specific crypto operations: keypair generation, ECIES encryption/decryption, symmetric encrypt/decrypt, and address derivation. Each engine ships the appropriate implementation for its chain's cryptographic primitives.
+The engine ships its own crypto CLI tool (EVM: `bhcrypt`, a Python port of the former `pam_web3_tool`). The tool provides chain-specific crypto operations: keypair generation, ECIES encryption/decryption, symmetric encrypt/decrypt, and address derivation. Each engine ships the appropriate implementation for its chain's cryptographic primitives.
 
 The `libpam-web3-tools` package is deprecated — its contents (crypto binary, NFT contract artifacts) are now engine-owned.
 
@@ -1048,7 +1056,7 @@ The `libpam-web3-tools` package is deprecated — its contents (crypto binary, N
 |-----------------|----------|
 | `installer/web/templates/wizard/wallet.html` | Engine wallet template (done) |
 | `installer/web/templates/wizard/blockchain.html` | Engine wizard template |
-| `installer/web/finalize.py` → `_finalize_keypair` | Engine finalization step (done — uses `nft_tool`) |
+| `installer/web/finalize.py` → `_finalize_keypair` | Engine finalization step (done — uses `bhcrypt`) |
 | `installer/web/finalize.py` → `_finalize_wallet` | Engine finalization step (calls `ab new server`) |
 | `installer/web/finalize.py` → `_finalize_contracts` | Engine finalization step (calls `blockhost-deploy-contracts`) |
 | `installer/web/finalize.py` → `_finalize_mint_nft` | Engine finalization step (calls `blockhost-mint-nft` + `bw set encrypt`) |

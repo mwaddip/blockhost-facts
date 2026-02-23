@@ -219,6 +219,7 @@ Shipped in `root-agent-actions/system.py` and `networking.py`:
 | `broker-renew` | `{}` (none) | `{ok, output}` | system.py |
 | `ip6-route-add` | `{address: str, dev: str}` | `{ok, output}` | networking.py |
 | `ip6-route-del` | `{address: str, dev: str}` | `{ok, output}` | networking.py |
+| `bridge-port-isolate` | `{dev: str}` | `{ok, output}` | networking.py |
 
 ### Shared Utilities (`_common.py`)
 
