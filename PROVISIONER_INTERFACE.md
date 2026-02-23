@@ -119,7 +119,7 @@ blockhost-vm-create <name>
 |-----|----------|---------|-------------|
 | `name` | yes | — | VM name (positional). Used as primary key everywhere. |
 | `--owner-wallet` | yes | — | Wallet address (chain-agnostic format). Baked into GECOS as `wallet=ADDRESS`. |
-| `--nft-token-id` | yes | — | NFT token ID (reserved by engine). Baked into GECOS as `nft=TOKEN_ID`. |
+| `--nft-token-id` | no | — | NFT token ID. If provided, baked into GECOS as `nft=TOKEN_ID`. Typically omitted at create time — engine calls `update-gecos` after minting with the actual token ID. |
 | `--expiry-days` | no | 30 | Days until VM expires. |
 | `--cpu` | no | 1 | vCPU count. |
 | `--memory` | no | 2048 | Memory in MB. |
@@ -136,7 +136,7 @@ blockhost-vm-create <name>
   "ip": "192.168.1.100",
   "ipv6": "2001:db8::100",
   "vmid": 100,
-  "nft_token_id": 42,
+  "nft_token_id": null,
   "username": "user"
 }
 ```
@@ -148,10 +148,10 @@ blockhost-vm-create <name>
 | `ip` | string | Assigned IPv4 address. |
 | `ipv6` | string | Assigned IPv6 address (may be empty if broker unavailable). |
 | `vmid` | int or string | Hypervisor-specific VM ID. Integer for Proxmox, domain name for libvirt. |
-| `nft_token_id` | int | NFT token ID (echo of `--nft-token-id` input). |
+| `nft_token_id` | int or null | NFT token ID (echo of `--nft-token-id` if provided, null otherwise). |
 | `username` | string | SSH username created in the VM. |
 
-**The engine depends on:** `status`, `vm_name`, `ip`, `ipv6`, `vmid`, `nft_token_id`, `username`. All fields must be present.
+**The engine depends on:** `status`, `vm_name`, `ip`, `ipv6`, `vmid`, `username`. All fields must be present. `nft_token_id` is optional (engine gets the actual token ID from mint output, not from provisioner).
 
 **Exit:** 0 on success, 1 on failure (stderr has error details).
 
