@@ -958,22 +958,49 @@ The engine contributes a blockchain configuration page and finalization steps to
 
 The installer's `blockchain.html` wizard page and all chain-specific finalization steps (`_finalize_keypair`, `_finalize_wallet`, `_finalize_contracts`, `_finalize_config` chain fields, `_finalize_mint_nft`, `_create_default_plan`) currently live in the installer repo with hardcoded EVM assumptions. Moving them to the engine makes the installer chain-agnostic.
 
-### Engine Manifest Extension
+### Engine Manifest Schema
 
-Add to a new engine manifest file (analogous to `provisioner.json`):
+**Installed to:** `/usr/share/blockhost/engine.json`
 
 ```json
 {
   "name": "evm",
   "version": "0.1.0",
-  "display_name": "EVM (Ethereum/Base/Sepolia)",
+  "display_name": "EVM (Ethereum/Polygon)",
 
   "setup": {
+    "first_boot_hook": "/usr/share/blockhost/engine-hooks/first-boot.sh",
     "wizard_module": "blockhost.engine_evm.wizard",
-    "finalization_steps": ["keypair", "wallet", "contracts", "config", "mint_nft", "plan", "signup"]
-  }
+    "finalization_steps": ["wallet", "contracts", "chain_config"],
+    "post_finalization_steps": ["mint_nft", "plan", "revenue_share"]
+  },
+
+  "config_keys": {
+    "session_key": "blockchain"
+  },
+
+  "constraints": { "..." }
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Machine-readable ID. |
+| `version` | string | yes | Package version (semver). |
+| `display_name` | string | yes | Shown in wizard UI. |
+| `setup.first_boot_hook` | string | no | Absolute path to first-boot hook script. Called after engine .deb and Node.js are installed. Installs engine-specific host dependencies (e.g. Foundry for EVM). Exit 0 = success, non-zero = fatal. Inherits `STATE_DIR` and `LOG_FILE` env vars. |
+| `setup.wizard_module` | string | yes | Python module path for dynamic import. |
+| `setup.finalization_steps` | list | yes | Ordered step IDs run during wizard finalization. |
+| `setup.post_finalization_steps` | list | yes | Steps run after main finalization (mint, plan, etc). |
+| `config_keys.session_key` | string | yes | Flask session key where wizard stores engine config. |
+
+### Consumers
+
+| Consumer | File | What it reads |
+|----------|------|---------------|
+| First-boot | `scripts/first-boot.sh` | `setup.first_boot_hook` — runs it after engine install. Absent = skip. |
+| Installer/wizard | `installer/web/app.py` | `setup.wizard_module`, `setup.finalization_steps`, `config_keys.session_key`, `display_name`, `constraints` |
+| Admin panel | `admin/auth.py`, `admin/system.py` | `constraints` (format validation) |
 
 ### `constraints` (manifest key)
 
