@@ -745,3 +745,109 @@ If `source` is not provided in `POST /v1/allocations`, it defaults to empty stri
 ### No authentication on REST API
 
 The REST API has no authentication. It is intended to be bound to localhost or an internal network. External adapters (like OPNet) connect to `127.0.0.1:8080`. The broker manager has its own wallet-based authentication.
+
+---
+
+## 13. Wizard Integration Hook
+
+The broker `.deb` provides a manifest and optional Python module for the installer wizard.
+
+### Manifest: `/usr/share/blockhost/broker.json`
+
+```json
+{
+  "name": "broker",
+  "display_name": "IPv6 Tunnel Broker",
+  "description": "Obtain an IPv6 prefix via encrypted WireGuard tunnel",
+  "excludes": ["manual"],
+  "setup": {
+    "wizard_module": "blockhost.broker.wizard_hook"
+  },
+  "chains": {
+    "evm": {
+      "wallet_pattern": "^0x[0-9a-fA-F]{40}$",
+      "contract_validation": "^0x[0-9a-fA-F]{40}$",
+      "fields": [
+        {
+          "name": "broker_registry",
+          "type": "text",
+          "label": "Registry Contract",
+          "placeholder": "0x...",
+          "hint": "The registry contract address on the blockchain network.",
+          "has_auto_fetch": true
+        }
+      ]
+    },
+    "opnet": {
+      "wallet_pattern": "^bc1p[a-z0-9]{58}$",
+      "contract_validation": "^0x[0-9a-fA-F]{64}$",
+      "fields": [
+        {
+          "name": "broker_registry",
+          "type": "text",
+          "label": "Registry Contract",
+          "placeholder": "0x...",
+          "hint": "The OPNet registry contract address (tweaked pubkey).",
+          "has_auto_fetch": true
+        }
+      ]
+    }
+  }
+}
+```
+
+### Manifest fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Identifier (used as option ID in checkbox list) |
+| `display_name` | string | yes | Shown as checkbox label in wizard |
+| `description` | string | yes | Shown below checkbox label |
+| `excludes` | string[] | no | Option IDs mutually exclusive with this one |
+| `setup.wizard_module` | string | no | Python module path to import (must be importable) |
+| `chains` | object | yes | Keyed by chain identifier |
+
+### Chain config fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `wallet_pattern` | string (regex) | yes | Matched against session wallet address to select chain |
+| `contract_validation` | string (regex) | no | Validates contract address input fields |
+| `fields` | array | yes | Field definitions for the wizard to render |
+
+### Field definition
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Form field name (must be unique) |
+| `type` | string | yes | `"text"` or `"select"` |
+| `label` | string | yes | Display label |
+| `placeholder` | string | no | Input placeholder text |
+| `hint` | string | no | Help text below the field |
+| `options` | array | conditional | Required for `type: "select"` |
+| `has_auto_fetch` | boolean | no | If true, wizard shows "Auto-fetch from GitHub" button |
+
+### Python module exports
+
+The module specified in `setup.wizard_module` may export:
+
+| Function | Signature | Required | Description |
+|----------|-----------|----------|-------------|
+| `fetch_registry` | `(wallet_address: str, testing: bool = False) -> Optional[str]` | no | Returns registry contract address for the given wallet's chain, or None |
+
+The wizard calls `fetch_registry()` when the user clicks "Auto-fetch from GitHub" via `GET /api/connectivity/fetch-registry`, and auto-fetches on page load when the broker section is visible and the registry field is empty.
+
+### Discovery
+
+The wizard reads `/usr/share/blockhost/broker.json` at startup. If the file is absent, the broker option is not shown — only "Manual" appears on the connectivity page.
+
+### Session data written by wizard
+
+```python
+session['ipv6'] = {
+    'mode': 'broker',
+    'broker_registry': '<contract address>',
+}
+```
+
+`finalize.py` reads `session['ipv6']` to call `broker-client --registry-contract`.
