@@ -637,3 +637,13 @@ Documented for awareness. These exist in the current implementation.
 - `status` output described as JSON; actual is plain text (one of four strings)
 
 This document (`PROVISIONER_INTERFACE.md`) reflects the actual implementation.
+
+### Wizard step coupling (DEBT)
+
+Provisioner wizard POST handlers hardcode the next wizard step by name (e.g. `url_for('wizard_connectivity')`). This couples every provisioner to the installer's internal step structure — renaming or reordering steps breaks all provisioners.
+
+**Correct design:** The provisioner should not know what follows it. The installer's `_NEXT_STEP` map owns navigation. Two options to address this:
+1. Expose a `get_next_step(plugin_id)` helper that provisioner blueprints can call
+2. Provisioner POST returns success/failure signal; installer handles the redirect
+
+Until fixed, the installer maintains a backwards-compat alias for any renamed steps.
