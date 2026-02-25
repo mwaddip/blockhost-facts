@@ -70,10 +70,10 @@ The Back button must point to the previous wizard step. For provisioner pages, t
 <a href="{{ url_for('wizard_blockchain') }}" class="btn btn-secondary">Back</a>
 ```
 
-On POST success, redirect to the next step (`wizard_ipv6`):
+On POST success, redirect to the next step (`wizard_connectivity`):
 
 ```python
-return redirect(url_for("wizard_ipv6"))
+return redirect(url_for("wizard_connectivity"))
 ```
 
 There is also a `wizard_nav()` template global that returns `{'prev': endpoint, 'next': endpoint}` for any step ID, but most pages hardcode their navigation for clarity.
