@@ -278,7 +278,7 @@ Custom roles can be added via `ab add` and addressed by name.
 
 **Installed:** `/usr/bin/ab` (wrapper → `/usr/share/blockhost/ab.js`)
 
-**Environment:** `RPC_URL`, `BLOCKHOST_CONTRACT` (loaded but only used for wallet generation via root agent).
+**Environment:** `RPC_URL`, `BLOCKHOST_CONTRACT`.
 
 **File:** `/etc/blockhost/addressbook.json`
 
@@ -614,7 +614,7 @@ Automated financial operations, integrated into the monitor polling loop.
 ### Hot Wallet
 
 Auto-generated on first fund cycle if not in addressbook:
-- Root agent `generate-wallet` action creates `/etc/blockhost/hot.key` (chmod 600)
+- Root agent `generate-wallet` action creates `/etc/blockhost/hot.key` (chmod 640)
 - Added to addressbook as `hot` with keyfile path
 - Acts as intermediary — contract funds flow through hot wallet before distribution
 
@@ -905,8 +905,28 @@ Conflicts: libpam-web3-tools
 | Contract source | `/opt/blockhost/contracts/BlockhostSubscriptions.sol` |
 | Contract artifact | `/usr/share/blockhost/contracts/BlockhostSubscriptions.json` |
 | Deploy scripts | `/opt/blockhost/scripts/deploy.ts`, `create-plan.ts` |
+| Root agent action: wallet | `/usr/share/blockhost/root-agent-actions/wallet.py` |
 | Systemd unit | `/lib/systemd/system/blockhost-monitor.service` |
 | Env example | `/opt/blockhost/.env.example` |
+
+### Engine-Provided Root Agent Actions
+
+Engines must ship chain-specific root agent action plugins to `/usr/share/blockhost/root-agent-actions/`. The root agent (from common) loads these automatically via plugin discovery.
+
+**Required action:**
+
+| Action | Params | Returns | Purpose |
+|--------|--------|---------|---------|
+| `generate-wallet` | `{name: str}` | `{ok, address, keyfile}` | Generate chain-specific keypair, write keyfile, add to addressbook |
+
+The handler must:
+1. Validate name (short alphanumeric, reject reserved names: `admin`, `server`, `hot`, `dev`, `broker`)
+2. Generate a private key (chain-specific derivation)
+3. Write to `/etc/blockhost/<name>.key` (root:blockhost, 0640)
+4. Derive the on-chain address from the private key
+5. Add entry to `/etc/blockhost/addressbook.json` with `address` and `keyfile`
+
+**Consumer:** Fund manager hot wallet auto-generation.
 
 ### Package Naming Convention (chain variants)
 

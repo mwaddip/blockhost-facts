@@ -179,7 +179,6 @@ This is the real interface. Everything else is a wrapper around this.
 |----------|-------------|--------|
 | `ip6_route_add(address, dev="vmbr0")` | `ip6-route-add` | `{address, dev}` | Always pass `dev` explicitly |
 | `ip6_route_del(address, dev="vmbr0")` | `ip6-route-del` | `{address, dev}` | Always pass `dev` explicitly |
-| `generate_wallet(name)` | `generate-wallet` | `{name}` |
 | `addressbook_save(entries)` | `addressbook-save` | `{entries}` |
 
 ### Exceptions
@@ -214,7 +213,6 @@ Shipped in `root-agent-actions/system.py` and `networking.py`:
 | `iptables-open` | `{port: int, proto: str, comment: str}` | `{ok, output}` | system.py |
 | `iptables-close` | `{port: int, proto: str, comment: str}` | `{ok, output}` | system.py |
 | `virt-customize` | `{image_path: str, commands: list[list]}` | `{ok, output}` | system.py |
-| `generate-wallet` | `{name: str}` | `{ok, address}` | system.py |
 | `addressbook-save` | `{entries: dict}` | `{ok}` | system.py |
 | `broker-renew` | `{}` (none) | `{ok, output}` | system.py |
 | `ip6-route-add` | `{address: str, dev: str}` | `{ok, output}` | networking.py |
