@@ -72,7 +72,7 @@ admin/                    S7  P9  E6  C8  I6  A7  L6
   Keep it lean: no new dependencies, no abstractions that outlive their purpose.
 ```
 
-### blockhost-engine / blockhost-engine-opnet
+### blockhost-engine-evm / blockhost-engine-opnet
 
 ```
 default (submodule)       S7  P7  E8  C5  I9  A7  L8
