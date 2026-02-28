@@ -76,7 +76,7 @@ The manifest is the single discovery mechanism. Every consumer finds the provisi
 |----------|------|---------------|
 | First-boot | `scripts/first-boot.sh` | `setup.first_boot_hook` — runs it. Hard failure if manifest missing. |
 | Installer/wizard | `installer/web/app.py` | `setup.wizard_module` (Blueprint import), `setup.finalization_steps`, `config_keys.session_key`, `display_name` |
-| Engine | `blockhost-engine/src/provisioner.ts` | `commands.*` — resolves verb to executable via `getCommand()` |
+| Engine | `blockhost-engine-evm/src/provisioner.ts` | `commands.*` — resolves verb to executable via `getCommand()` |
 | Common dispatcher | `blockhost-common/.../provisioner.py` | `commands.*` — `ProvisionerDispatcher` caches manifest, provides `get_command()` |
 | Root agent daemon | `blockhost-common/.../root_agent_daemon.py` | `root_agent_actions` — loads module, merges `ACTIONS` dict |
 
@@ -613,7 +613,7 @@ Documented for awareness. These exist in the current implementation.
 
 ### ~~`blockhost-mint-nft` not in manifest dispatch~~ (RESOLVED)
 
-~~The engine hardcodes `blockhost-mint-nft` instead of resolving through manifest.~~ Resolved: `mint_nft.py` moved from provisioner packages to blockhost-engine. The CLI (`/usr/bin/blockhost-mint-nft`) and Python module (`blockhost.mint_nft`) are now shipped by the engine .deb. The manifest correctly has no `"mint-nft"` verb — minting is engine-owned.
+~~The engine hardcodes `blockhost-mint-nft` instead of resolving through manifest.~~ Resolved: `mint_nft.py` moved from provisioner packages to the engine package. The CLI (`/usr/bin/blockhost-mint-nft`) and Python module (`blockhost.mint_nft`) are now shipped by the engine .deb. The manifest correctly has no `"mint-nft"` verb — minting is engine-owned.
 
 ### ~~Hardcoded `/opt/` paths in app.py~~ (FIXED)
 

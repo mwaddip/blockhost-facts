@@ -5,7 +5,7 @@
 > Any second engine implementation (e.g., `blockhost-engine-opnet`) must satisfy
 > this contract to be a drop-in replacement.
 >
-> Derived from the working EVM implementation (`blockhost-engine`).
+> Derived from the working EVM implementation (`blockhost-engine-evm`).
 > See also: `COMMON_INTERFACE.md` (shared library API), `ADMIN_INTERFACE.md`
 > (admin panel — a consumer of engine CLIs).
 
@@ -869,9 +869,9 @@ WantedBy=multi-user.target
 
 **Installed to:** `/lib/systemd/system/blockhost-monitor.service`
 
-### Package: `blockhost-engine`
+### Package: `blockhost-engine-evm`
 
-**Name:** `blockhost-engine_<version>_all.deb`
+**Name:** `blockhost-engine-evm_<version>_all.deb`
 
 **Dependencies:**
 ```
@@ -930,7 +930,7 @@ The handler must:
 
 ### Package Naming Convention (chain variants)
 
-The current package is `blockhost-engine` (EVM). Future chain-specific variants should follow `blockhost-engine-<chain>` (e.g., `blockhost-engine-opnet`). Engine packages should declare `Conflicts:` with each other — only one engine can be active per host.
+The EVM package is `blockhost-engine-evm`. All engine packages follow the `blockhost-engine-<chain>` naming convention (e.g., `blockhost-engine-opnet`). Engine packages should declare `Conflicts:` with each other — only one engine can be active per host.
 
 ---
 
@@ -1185,7 +1185,7 @@ On VM create failure after token reservation: the reservation is marked failed (
 
 ### Both-Engines-Must-Implement
 
-Both `blockhost-engine` (EVM) and `blockhost-engine-opnet` (OPNet) must implement this pipeline with the same stage names and state file schema. Chain-specific differences: timeouts (EVM ~12s block time → shorter mint timeout), provider library (ethers vs opnet), transaction model (nonce vs UTXO).
+Both `blockhost-engine-evm` (EVM) and `blockhost-engine-opnet` (OPNet) must implement this pipeline with the same stage names and state file schema. Chain-specific differences: timeouts (EVM ~12s block time → shorter mint timeout), provider library (ethers vs opnet), transaction model (nonce vs UTXO).
 
 ---
 

@@ -462,7 +462,7 @@ contract_address: "0x..."
 | 1 | ~~`qm_start/stop/shutdown/destroy`~~ | ~~`root_agent.py`~~ | ~~Proxmox-specific wrappers in common~~ | RESOLVED: removed from codebase |
 | 2 | ~~`get_terraform_dir()`~~ | ~~`config.py`~~ | ~~Terraform is Proxmox-specific~~ | RESOLVED: removed from codebase |
 | 3 | ~~`TERRAFORM_DIR` constant~~ | ~~`config.py`, `__init__.py`~~ | ~~Same~~ | RESOLVED: removed from codebase |
-| 4 | ~~`mint_nft` module~~ | ~~`blockhost/mint_nft.py`~~ | ~~Minting is engine responsibility~~ | RESOLVED: moved to blockhost-engine |
+| 4 | ~~`mint_nft` module~~ | ~~`blockhost/mint_nft.py`~~ | ~~Minting is engine responsibility~~ | RESOLVED: moved to blockhost-engine-evm |
 | 5 | ~~`LEGACY_COMMANDS` fallback~~ | ~~`provisioner.py`~~ | ~~Hardcoded Proxmox commands when no manifest~~ | RESOLVED: removed from codebase |
 | 6 | ~~`ALLOWED_ROUTE_DEVS = {'vmbr0'}`~~ | ~~`_common.py`~~ | ~~vmbr0 is Proxmox-specific bridge name~~ | RESOLVED: expanded to include virbr0, br0, br-ext, docker0 |
 | 7 | ~~`QM_SET_ALLOWED_KEYS`, `QM_CREATE_ALLOWED_ARGS`~~ | ~~`_common.py`~~ | ~~Proxmox constants in shared code~~ | RESOLVED: removed from codebase (live in provisioner-proxmox's qm.py) |
@@ -479,5 +479,5 @@ contract_address: "0x..."
 | **blockhost-provisioner-proxmox** | config (5 functions), vm_db, root_agent (ip6 wrappers + errors), cloud_init | db.yaml, web3-defaults.yaml, broker-allocation.json |
 | **blockhost-provisioner-libvirt** | config (3 functions), vm_db, root_agent (`call()` direct), cloud_init | db.yaml, web3-defaults.yaml, broker-allocation.json |
 | **blockhost (installer)** | config, provisioner dispatcher | web3-defaults.yaml |
-| **blockhost-engine** | config, vm_db, root_agent | db.yaml, web3-defaults.yaml |
+| **blockhost-engine-evm** | config, vm_db, root_agent | db.yaml, web3-defaults.yaml |
 | **blockhost-broker** | config (broker allocation) | broker-allocation.json |
