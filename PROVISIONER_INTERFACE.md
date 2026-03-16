@@ -34,7 +34,8 @@ The manifest is the single discovery mechanism. Every consumer finds the provisi
     "throttle":       "<executable-name>",
     "build-template": "<executable-name>",
     "gc":             "<executable-name>",
-    "resume":         "<executable-name>"
+    "resume":         "<executable-name>",
+    "update-gecos":   "<executable-name>"
   },
 
   "setup": {
@@ -75,7 +76,7 @@ The manifest is the single discovery mechanism. Every consumer finds the provisi
 |----------|------|---------------|
 | First-boot | `scripts/first-boot.sh` | `setup.first_boot_hook` — runs it. Hard failure if manifest missing. |
 | Installer/wizard | `installer/web/app.py` | `setup.wizard_module` (Blueprint import), `setup.finalization_steps`, `config_keys.session_key`, `display_name` |
-| Engine | `blockhost-engine/src/provisioner.ts` | `commands.*` — resolves verb to executable via `getCommand()` |
+| Engine | `blockhost-engine-evm/src/provisioner.ts` | `commands.*` — resolves verb to executable via `getCommand()` |
 | Common dispatcher | `blockhost-common/.../provisioner.py` | `commands.*` — `ProvisionerDispatcher` caches manifest, provides `get_command()` |
 | Root agent daemon | `blockhost-common/.../root_agent_daemon.py` | `root_agent_actions` — loads module, merges `ACTIONS` dict |
 
@@ -96,37 +97,35 @@ All commands are resolved through the manifest. The engine calls `getCommand("cr
 
 ### `create`
 
-The most complex command. Creates a VM, optionally mints an NFT.
+The most complex command. Creates a VM with cloud-init and GECOS configuration.
+
+The engine handles all NFT operations (reservation, encryption, minting). The provisioner receives the token ID and wallet address, bakes them into GECOS, creates the VM, and returns a JSON summary.
 
 **Actual signature:**
 ```
 blockhost-vm-create <name>
-    --owner-wallet <0x...>
+    --owner-wallet <address>
+    --nft-token-id <int>
+    [--expiry-days N]
     [--cpu N]
     [--memory N]
     [--disk N]
     [--apply]
     [--cloud-init-content <path>]
-    [--skip-mint]
-    [--no-mint]
-    [--user-signature <hex>]
-    [--public-secret <str>]
     [--mock]
 ```
 
 | Arg | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `name` | yes | — | VM name (positional). Used as primary key everywhere. |
-| `--owner-wallet` | yes | — | Ethereum address (0x...). Owner of the access NFT. |
+| `--owner-wallet` | yes | — | Wallet address (chain-agnostic format). Baked into GECOS as `wallet=ADDRESS`. |
+| `--nft-token-id` | no | — | NFT token ID. If provided, baked into GECOS as `nft=TOKEN_ID`. Typically omitted at create time — engine calls `update-gecos` after minting with the actual token ID. |
+| `--expiry-days` | no | 30 | Days until VM expires. |
 | `--cpu` | no | 1 | vCPU count. |
 | `--memory` | no | 2048 | Memory in MB. |
 | `--disk` | no | 20 | Disk in GB. |
 | `--apply` | no | false | Actually create. Without this, dry-run (plan only). |
 | `--cloud-init-content` | no | — | Path to pre-rendered cloud-init YAML. If absent, provisioner renders its own using `blockhost.cloud_init.render_cloud_init()`. |
-| `--skip-mint` | no | false | Don't mint NFT (legacy flag). |
-| `--no-mint` | no | false | Don't mint NFT (engine handles minting separately). **This is the flag the engine uses.** |
-| `--user-signature` | no | — | User's wallet signature (hex). Enables encrypted connection details in NFT. |
-| `--public-secret` | no | — | Signed message (`libpam-web3:<address>:<nonce>`). Required with `--user-signature`. |
 | `--mock` | no | false | Use mock database. |
 
 **stdout on success (JSON):**
@@ -137,7 +136,7 @@ blockhost-vm-create <name>
   "ip": "192.168.1.100",
   "ipv6": "2001:db8::100",
   "vmid": 100,
-  "nft_token_id": 42,
+  "nft_token_id": null,
   "username": "user"
 }
 ```
@@ -149,10 +148,10 @@ blockhost-vm-create <name>
 | `ip` | string | Assigned IPv4 address. |
 | `ipv6` | string | Assigned IPv6 address (may be empty if broker unavailable). |
 | `vmid` | int or string | Hypervisor-specific VM ID. Integer for Proxmox, domain name for libvirt. |
-| `nft_token_id` | int | Reserved NFT token ID (even if minting was skipped). |
+| `nft_token_id` | int or null | NFT token ID (echo of `--nft-token-id` if provided, null otherwise). |
 | `username` | string | SSH username created in the VM. |
 
-**The engine depends on:** `status`, `vm_name`, `ip`, `ipv6`, `vmid`, `nft_token_id`, `username`. All fields must be present.
+**The engine depends on:** `status`, `vm_name`, `ip`, `ipv6`, `vmid`, `username`. All fields must be present. `nft_token_id` is optional (engine gets the actual token ID from mint output, not from provisioner).
 
 **Exit:** 0 on success, 1 on failure (stderr has error details).
 
@@ -315,6 +314,33 @@ Apply resource limits. Currently unimplemented in all provisioners.
 
 ---
 
+### `update-gecos`
+
+```
+blockhost-vm-update-gecos <name> <wallet-address> --nft-id <token_id>
+```
+
+Updates the GECOS field of the VM's primary user to reflect a new wallet address. Called by the engine reconciler when an NFT ownership transfer is detected.
+
+| Arg | Required | Description |
+|-----|----------|-------------|
+| `name` | yes | VM name (positional) |
+| `wallet-address` | yes | New owner's wallet address (any chain format, positional) |
+| `--nft-id` | yes | NFT token ID (integer) |
+
+**Behavior:**
+1. Look up VM in database to get hypervisor-specific identifier and username
+2. Construct GECOS string: `wallet=<wallet-address>,nft=<nft_id>`
+3. Execute `usermod -c "<gecos>" <username>` on the running VM via QEMU guest agent
+
+**Exit:** 0 = GECOS updated. 1 = failed (VM stopped, guest agent unresponsive, VM not found).
+
+**Consumers:** Engine reconciler (ownership transfer detection).
+
+**Note:** The VM must be running with a responsive QEMU guest agent. If the VM is stopped or suspended, the command fails and the reconciler retries on the next cycle.
+
+---
+
 ### `detect`
 
 ```
@@ -371,7 +397,7 @@ def wizard_page():
 
 The POST handler must:
 1. Save all provisioner config to `session[<session_key>]` as a dict
-2. Redirect to `url_for("wizard_ipv6")` (the next step after provisioner config)
+2. Redirect to `url_for("wizard_connectivity")` (the next step after provisioner config)
 
 Templates must extend `base.html` and use the `step_bar` macro. See `facts/WIZARD_UI.md` for the complete style guide — HTML patterns, CSS classes, components, and anti-patterns.
 
@@ -534,7 +560,7 @@ The provisioner **declares** which keys it owns in the manifest. The installer w
 
 | File | Managed by | Provisioner reads |
 |------|-----------|-------------------|
-| `/etc/blockhost/web3-defaults.yaml` | Installer | `rpc_url`, `nft_contract`, `deployer_key_path` — for NFT minting |
+| `/etc/blockhost/web3-defaults.yaml` | Installer | `auth.otp_length`, `auth.otp_ttl_seconds` — for cloud-init template variables |
 | `/etc/blockhost/broker-allocation.json` | Broker client | `ipv6_prefix`, `gateway` — for IPv6 VM access |
 
 ### Config loading
@@ -575,7 +601,7 @@ Conflicts: blockhost-provisioner-proxmox
 ### Dependencies
 
 ```
-Depends: python3 (>= 3.10), blockhost-common (>= 0.1.0), libpam-web3-tools (>= 0.5.0)
+Depends: python3 (>= 3.10), blockhost-common (>= 0.1.0)
 Recommends: <hypervisor-specific packages>
 ```
 
@@ -587,7 +613,7 @@ Documented for awareness. These exist in the current implementation.
 
 ### ~~`blockhost-mint-nft` not in manifest dispatch~~ (RESOLVED)
 
-~~The engine hardcodes `blockhost-mint-nft` instead of resolving through manifest.~~ Resolved: `mint_nft.py` moved from provisioner packages to blockhost-engine. The CLI (`/usr/bin/blockhost-mint-nft`) and Python module (`blockhost.mint_nft`) are now shipped by the engine .deb. The manifest correctly has no `"mint-nft"` verb — minting is engine-owned.
+~~The engine hardcodes `blockhost-mint-nft` instead of resolving through manifest.~~ Resolved: `mint_nft.py` moved from provisioner packages to the engine package. The CLI (`/usr/bin/blockhost-mint-nft`) and Python module (`blockhost.mint_nft`) are now shipped by the engine .deb. The manifest correctly has no `"mint-nft"` verb — minting is engine-owned.
 
 ### ~~Hardcoded `/opt/` paths in app.py~~ (FIXED)
 
@@ -611,3 +637,13 @@ Documented for awareness. These exist in the current implementation.
 - `status` output described as JSON; actual is plain text (one of four strings)
 
 This document (`PROVISIONER_INTERFACE.md`) reflects the actual implementation.
+
+### Wizard step coupling (DEBT)
+
+Provisioner wizard POST handlers hardcode the next wizard step by name (e.g. `url_for('wizard_connectivity')`). This couples every provisioner to the installer's internal step structure — renaming or reordering steps breaks all provisioners.
+
+**Correct design:** The provisioner should not know what follows it. The installer's `_NEXT_STEP` map owns navigation. Two options to address this:
+1. Expose a `get_next_step(plugin_id)` helper that provisioner blueprints can call
+2. Provisioner POST returns success/failure signal; installer handles the redirect
+
+Until fixed, the installer maintains a backwards-compat alias for any renamed steps.

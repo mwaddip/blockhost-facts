@@ -90,7 +90,7 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
-| `reserve_nft_token_id` | `(vm_name, token_id=None)` | `int` | Auto-allocates if token_id is None |
+| `reserve_nft_token_id` | `(vm_name, token_id=None)` | `int` | Auto-allocates if token_id is None. Raises `ValueError` if token_id already reserved (status != "failed"). |
 | `mark_nft_minted` | `(token_id, owner_wallet)` | `None` | Records successful mint |
 | `mark_nft_failed` | `(token_id)` | `None` | Marks reservation as failed |
 | `get_nft_token` | `(token_id)` | `Optional[dict]` | Lookup by token ID |
@@ -114,11 +114,43 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 }
 ```
 
+### NFT Token Schema
+
+NFT tokens are tracked in a separate top-level `reserved_nft_tokens` map in the database (not inside VM records). Keyed by token ID (string).
+
+```python
+"reserved_nft_tokens": {
+    "<token_id>": {
+        "vm_name": str,
+        "status": "reserved" | "minted" | "failed",
+        "reserved_at": str,          # ISO 8601
+        "owner_wallet": Optional[str],  # Set on mint
+        "minted_at": Optional[str],     # Set on mint
+        "failed_at": Optional[str],     # Set on failure
+    }
+}
+```
+
+### Locking Model
+
+Production (`VMDatabase`) uses a separate lockfile at `{db_file}.lock` to avoid the truncation-before-lock problem (`open("w")` truncates before `fcntl.flock()` runs on the same fd).
+
+| Method | Lock | Purpose |
+|--------|------|---------|
+| `_atomic_update(mutator)` | Exclusive on lockfile | All mutations. Acquires lock → reads DB → calls `mutator(db_dict)` → writes via temp+rename → releases lock. Single critical section eliminates TOCTOU. |
+| `_read_db()` | Shared on DB file | Read-only access for non-mutating methods (`get_vm`, `list_vms`, `get_expired_vms`, etc.) |
+| `_read_db_unlocked()` | None (internal) | Called within `_atomic_update` only — lock already held |
+| `_write_db_unlocked()` | None (internal) | Atomic write via temp file + rename. Called within `_atomic_update` only. |
+
+`_atomic_update` is abstract on `VMDatabaseBase`. `VMDatabase` implements it with `fcntl.LOCK_EX` on the lockfile. `MockVMDatabase` implements it as a passthrough (read → mutate → write, no locking).
+
+All 13 mutating methods in the base class use `_atomic_update`: `register_vm`, `mark_suspended`, `mark_active`, `mark_destroyed`, `allocate_ip`, `allocate_ipv6`, `allocate_vmid`, `extend_expiry`, `reserve_nft_token_id`, `mark_nft_minted`, `mark_nft_failed`. Plus `release_ip` and `release_ipv6` on `VMDatabase`.
+
 ### Storage
 
-- Production: JSON file with `fcntl` file locking at path from `db.yaml` → `db_file`
-- Default: `/var/lib/blockhost/vms.json`
-- Mock: in-memory, no file I/O
+- Production: JSON file at path from `db.yaml` → `db_file`, lockfile at `{db_file}.lock`
+- Default: `/var/lib/blockhost/vms.json` (lockfile: `vms.json.lock`)
+- Mock: in-memory, no file locking
 
 ---
 
@@ -147,7 +179,6 @@ This is the real interface. Everything else is a wrapper around this.
 |----------|-------------|--------|
 | `ip6_route_add(address, dev="vmbr0")` | `ip6-route-add` | `{address, dev}` | Always pass `dev` explicitly |
 | `ip6_route_del(address, dev="vmbr0")` | `ip6-route-del` | `{address, dev}` | Always pass `dev` explicitly |
-| `generate_wallet(name)` | `generate-wallet` | `{name}` |
 | `addressbook_save(entries)` | `addressbook-save` | `{entries}` |
 
 ### Exceptions
@@ -182,11 +213,11 @@ Shipped in `root-agent-actions/system.py` and `networking.py`:
 | `iptables-open` | `{port: int, proto: str, comment: str}` | `{ok, output}` | system.py |
 | `iptables-close` | `{port: int, proto: str, comment: str}` | `{ok, output}` | system.py |
 | `virt-customize` | `{image_path: str, commands: list[list]}` | `{ok, output}` | system.py |
-| `generate-wallet` | `{name: str}` | `{ok, address}` | system.py |
 | `addressbook-save` | `{entries: dict}` | `{ok}` | system.py |
 | `broker-renew` | `{}` (none) | `{ok, output}` | system.py |
 | `ip6-route-add` | `{address: str, dev: str}` | `{ok, output}` | networking.py |
 | `ip6-route-del` | `{address: str, dev: str}` | `{ok, output}` | networking.py |
+| `bridge-port-isolate` | `{dev: str}` | `{ok, output}` | networking.py |
 
 ### Shared Utilities (`_common.py`)
 
@@ -245,7 +276,7 @@ Module: `blockhost.cloud_init`
 
 | Template | Variables Required | Purpose |
 |----------|-------------------|---------|
-| `nft-auth.yaml` | `VM_NAME`, `SIGNING_HOST`, `SIGNING_DOMAIN`, `USERNAME`, `NFT_TOKEN_ID`, `CHAIN_ID`, `NFT_CONTRACT`, `RPC_URL`, `OTP_LENGTH`, `OTP_TTL`, `SECRET_KEY` | NFT-authenticated VM with PAM module |
+| `nft-auth.yaml` | `VM_NAME`, `SIGNING_HOST`, `SIGNING_DOMAIN`, `USERNAME`, `WALLET_ADDRESS`, `NFT_TOKEN_ID`, `OTP_LENGTH`, `OTP_TTL`, `SECRET_KEY` | NFT-authenticated VM with PAM module. Requires both `libpam-web3` (PAM) and engine auth-svc template package on VM. |
 | `webserver.yaml` | (none) | nginx + UFW |
 | `devbox.yaml` | (none) | Build tools + dev environment |
 
@@ -345,13 +376,11 @@ deployer:
 
 signing_page:
   port: 8443
-  html_path: "/usr/share/libpam-web3-tools/signing-page/index.html"
+  html_path: "/usr/share/blockhost/signing-page/index.html"  # Engine-provided
 
 auth:
   otp_length: 6
   otp_ttl_seconds: 300
-  callback_enabled: true
-  callback_grace_seconds: 10
 ```
 
 **Owned by**: common (ships template in .deb)
@@ -433,7 +462,7 @@ contract_address: "0x..."
 | 1 | ~~`qm_start/stop/shutdown/destroy`~~ | ~~`root_agent.py`~~ | ~~Proxmox-specific wrappers in common~~ | RESOLVED: removed from codebase |
 | 2 | ~~`get_terraform_dir()`~~ | ~~`config.py`~~ | ~~Terraform is Proxmox-specific~~ | RESOLVED: removed from codebase |
 | 3 | ~~`TERRAFORM_DIR` constant~~ | ~~`config.py`, `__init__.py`~~ | ~~Same~~ | RESOLVED: removed from codebase |
-| 4 | ~~`mint_nft` module~~ | ~~`blockhost/mint_nft.py`~~ | ~~Minting is engine responsibility~~ | RESOLVED: moved to blockhost-engine |
+| 4 | ~~`mint_nft` module~~ | ~~`blockhost/mint_nft.py`~~ | ~~Minting is engine responsibility~~ | RESOLVED: moved to blockhost-engine-evm |
 | 5 | ~~`LEGACY_COMMANDS` fallback~~ | ~~`provisioner.py`~~ | ~~Hardcoded Proxmox commands when no manifest~~ | RESOLVED: removed from codebase |
 | 6 | ~~`ALLOWED_ROUTE_DEVS = {'vmbr0'}`~~ | ~~`_common.py`~~ | ~~vmbr0 is Proxmox-specific bridge name~~ | RESOLVED: expanded to include virbr0, br0, br-ext, docker0 |
 | 7 | ~~`QM_SET_ALLOWED_KEYS`, `QM_CREATE_ALLOWED_ARGS`~~ | ~~`_common.py`~~ | ~~Proxmox constants in shared code~~ | RESOLVED: removed from codebase (live in provisioner-proxmox's qm.py) |
@@ -450,5 +479,5 @@ contract_address: "0x..."
 | **blockhost-provisioner-proxmox** | config (5 functions), vm_db, root_agent (ip6 wrappers + errors), cloud_init | db.yaml, web3-defaults.yaml, broker-allocation.json |
 | **blockhost-provisioner-libvirt** | config (3 functions), vm_db, root_agent (`call()` direct), cloud_init | db.yaml, web3-defaults.yaml, broker-allocation.json |
 | **blockhost (installer)** | config, provisioner dispatcher | web3-defaults.yaml |
-| **blockhost-engine** | config, vm_db, root_agent | db.yaml, web3-defaults.yaml |
+| **blockhost-engine-evm** | config, vm_db, root_agent | db.yaml, web3-defaults.yaml |
 | **blockhost-broker** | config (broker allocation) | broker-allocation.json |

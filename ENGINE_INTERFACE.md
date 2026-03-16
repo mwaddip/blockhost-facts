@@ -5,7 +5,7 @@
 > Any second engine implementation (e.g., `blockhost-engine-opnet`) must satisfy
 > this contract to be a drop-in replacement.
 >
-> Derived from the working EVM implementation (`blockhost-engine`).
+> Derived from the working EVM implementation (`blockhost-engine-evm`).
 > See also: `COMMON_INTERFACE.md` (shared library API), `ADMIN_INTERFACE.md`
 > (admin panel — a consumer of engine CLIs).
 
@@ -278,7 +278,7 @@ Custom roles can be added via `ab add` and addressed by name.
 
 **Installed:** `/usr/bin/ab` (wrapper → `/usr/share/blockhost/ab.js`)
 
-**Environment:** `RPC_URL`, `BLOCKHOST_CONTRACT` (loaded but only used for wallet generation via root agent).
+**Environment:** `RPC_URL`, `BLOCKHOST_CONTRACT`.
 
 **File:** `/etc/blockhost/addressbook.json`
 
@@ -318,7 +318,7 @@ Update address for existing entry. Preserves `keyfile` field if present.
 ab new <name>
 ```
 
-Generate new secp256k1 keypair via `pam_web3_tool generate-keypair`. Saves private key to `/etc/blockhost/<name>.key` (chmod 600), adds entry to addressbook with `keyfile` field.
+Generate new secp256k1 keypair via `bhcrypt generate-keypair`. Saves private key to `/etc/blockhost/<name>.key` (chmod 600), adds entry to addressbook with `keyfile` field.
 
 **Consumers:** `admin/system.py` (`_run_ab(["new", name])`)
 
@@ -366,89 +366,32 @@ The deployer/server wallet is generated interactively through the wizard UI (whi
 
 ### `blockhost-mint-nft`
 
-**Installed:** `/usr/bin/blockhost-mint-nft` (Python script)
-**Python module:** `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` (importable as `from blockhost.mint_nft import mint_nft`)
+**Installed:** `/usr/bin/blockhost-mint-nft`
 
 ```
 blockhost-mint-nft \
-  --owner-wallet <0x...> \
-  --machine-id <vm-name> \
+  --owner-wallet <address> \
   [--user-encrypted <hex>] \
-  [--public-secret <string>] \
   [--dry-run]
 ```
 
 | Arg | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `--owner-wallet` | yes | — | Ethereum address to receive NFT |
-| `--machine-id` | yes | — | VM name (used in NFT description) |
-| `--user-encrypted` | no | `0x` | Hex-encoded encrypted connection details |
-| `--public-secret` | no | `""` | Message user signed (`libpam-web3:<address>:<nonce>`) |
-| `--dry-run` | no | false | Print cast command without executing |
+| `--owner-wallet` | yes | — | Wallet address to receive NFT (chain-agnostic format) |
+| `--user-encrypted` | no | `""` | Hex-encoded encrypted connection details |
+| `--dry-run` | no | false | Simulate without broadcasting |
 
-**Config:** `load_web3_config()` → `deployer.private_key_file`, `blockchain.nft_contract`, `blockchain.rpc_url`
+**Config:** `web3-defaults.yaml` → `blockchain.nft_contract`, `blockchain.rpc_url`. Deployer key from env or `/etc/blockhost/deployer.mnemonic` (OPNet) / `deployer.key` (EVM).
 
-**Implementation:** Shells out to Foundry `cast send` with the NFT contract's `mint()` function.
-
-**Python function signature:**
-```python
-def mint_nft(
-    owner_wallet: str,
-    machine_id: str,
-    user_encrypted: str = "0x",
-    public_secret: str = "",
-    config: dict = None,       # Override for load_web3_config()
-    dry_run: bool = False,
-) -> dict:
-    """Returns {"success": True, "tx_hash": "0x..."} or {"success": False, "error": "..."}"""
-```
+**Implementation:** Calls `mint(address, userEncrypted)` on the AccessCredentialNFT contract (2 params). Returns the minted token ID on stdout.
 
 **Consumers:**
-- Monitor event handler (CLI: `blockhost-mint-nft --owner-wallet ... --machine-id ...`)
-- `installer/web/finalize.py` (Python import: `from blockhost.mint_nft import mint_nft`)
+- Monitor event handler (CLI: `blockhost-mint-nft --owner-wallet ... --user-encrypted ...`)
+- Engine wizard `finalize_mint_nft()` (CLI call)
 
-**Exit:** 0/1.
+**Exit:** 0/1. stdout = token ID on success.
 
 ---
-
-### `blockhost-init` — DEPRECATION PLANNED
-
-**Installed:** `/usr/bin/blockhost-init` (bash script)
-
-> **Planned:** Wallet generation responsibilities move to `ab new server` (called by wizard UI)
-> and `ab --init` (non-interactive bootstrap). Server ECIES key generation (not a wallet —
-> used for userEncrypted decryption and admin command decryption) remains as a distinct
-> operation, either retained in a slimmed-down `blockhost-init` or moved to engine wizard
-> finalization. Config file initialization (`blockhost.yaml`, `vms.json`) moves to engine
-> wizard finalization steps.
-
-```
-sudo blockhost-init \
-  [--public-secret <message>] \
-  [--deployer-key <0x...>] \
-  [--deployer-key-file <path>] \
-  [--help]
-```
-
-| Arg | Required | Default | Description |
-|-----|----------|---------|-------------|
-| `--public-secret` | no | `blockhost-access` | Static message users sign for auth |
-| `--deployer-key` | no | — | Use existing private key (hex, strips `0x`) |
-| `--deployer-key-file` | no | — | Read key from file |
-
-**Must run as root.** One-time server initialization:
-
-1. Generate server secp256k1 keypair → `/etc/blockhost/server.key` (chmod 600)
-2. Generate or import deployer keypair → `/etc/blockhost/deployer.key` (chmod 600)
-3. Derive deployer address via `cast wallet address`
-4. Write `/etc/blockhost/blockhost.yaml` (public_secret, server_public_key, deployer_address, contract_address="")
-5. Initialize `/var/lib/blockhost/vms.json` (empty database)
-
-**Prerequisites:** `pam_web3_tool`, `cast` (Foundry), `/etc/blockhost/`, `/var/lib/blockhost/`
-
-**stdout:** Server public key, deployer address, public secret.
-**Exit:** 0/1.
-**Consumers:** `scripts/first-boot.sh`
 
 ---
 
@@ -576,6 +519,11 @@ Requires `stablecoinReserve >= minLiquidityUsd` (default $10,000).
 - `userEncrypted` in `buySubscription` is ECIES-encrypted connection details — the engine decrypts with `server.key` after VM creation and re-encrypts for the NFT
 - Subscription IDs are sequential starting from 1
 
+### OPNet-Specific Notes
+
+- `days` parameter in `buySubscription` and `extendSubscription` is capped at 36500 (~100 years) — reverts with `Days exceeds maximum` if exceeded. Guards against u256→u64 truncation in duration calculation.
+- Per-subscriber subscription arrays use `StoredU256Array` with full 32-byte `Address` as sub-pointer (no truncation)
+
 ---
 
 ## 3. Monitor Service
@@ -591,21 +539,27 @@ The monitor is the adapter boundary between the chain and the provisioner. It tr
 2. Decode events against contract ABI
 3. Dispatch to event handlers (see below)
 4. Process admin commands (if configured)
-5. Periodic tasks (on their own intervals):
+5. Periodic tasks (on their own intervals, all `await`ed, all guarded by `isPipelineBusy()`):
    - **Reconciliation:** every 5 minutes
    - **Fund cycle:** every 24 hours (configurable)
    - **Gas check:** every 30 minutes (configurable)
+
+**Pipeline integration:** After processing block events, the monitor checks `isPipelineBusy()` before launching reconciliation, fund cycle, or gas check. All three are `await`ed (not `.catch()` fire-and-forget). This eliminates concurrent DB access between handlers and background tasks. On startup, the monitor initializes the token counter (if `next_token_id == -1`) and resumes any incomplete pipeline from a previous run.
 
 ### Event Handlers
 
 **`SubscriptionCreated`:**
 1. Format VM name: `blockhost-NNN` (3-digit zero-padded subscription ID)
 2. Calculate expiry days from `expiresAt` timestamp
-3. Call provisioner: `blockhost-vm-create blockhost-NNN --owner-wallet <subscriber> --no-mint --apply`
-4. Parse JSON output from provisioner (ip, vmid, nft_token_id, username)
-5. Decrypt `userEncrypted` using server private key
-6. Call: `blockhost-mint-nft --owner-wallet <subscriber> --machine-id blockhost-NNN --user-encrypted <encrypted_details> --public-secret <secret>`
-7. Mark NFT minted in database
+3. Decrypt `userEncrypted` using server private key (ECIES)
+4. Call provisioner: `blockhost-vm-create blockhost-NNN --owner-wallet <subscriber> --expiry-days <days> --apply`
+5. Parse JSON output from provisioner (ip, vmid, username)
+6. Encrypt connection details (hostname, port, username) using decrypted user signature (symmetric)
+7. Call: `blockhost-mint-nft --owner-wallet <subscriber> --user-encrypted <encrypted_details>` → capture token ID from stdout
+8. Call provisioner: `blockhost-vm-update-gecos blockhost-NNN <subscriber> --nft-id <actual_token_id>`
+9. Mark NFT minted in database (`await` — never fire-and-forget)
+
+No token reservation. The actual minted token ID comes from `blockhost-mint-nft` stdout, then gets baked into GECOS via `update-gecos`.
 
 **`SubscriptionExtended`:**
 1. Calculate additional days
@@ -620,12 +574,13 @@ Log only (informational).
 
 ### NFT Reconciliation
 
-**Interval:** 5 minutes. **Guards:** skips if provisioning in progress (`pgrep` for create command or lock file).
+**Interval:** 5 minutes. **Guards:** skips if `isPipelineBusy()` returns true (replaces former `pgrep` check). Also performs token counter drift correction: compares `next_token_id` in `pipeline.json` with on-chain `totalSupply()` and corrects upward if the chain has more tokens.
 
 Verifies local `vms.json` NFT state matches on-chain:
-- Checks for tokens that exist on-chain but aren't marked minted locally
-- Checks `reserved_nft_tokens` map for un-minted reservations
+- Checks for VMs with `nft_minted: false` that have NFTs on-chain (ownership match by wallet)
+- Updates GECOS via `update-gecos` if NFT token ID is missing or wrong
 - Fixes discrepancies by marking tokens as minted (via Python `blockhost.vm_db` or direct JSON update)
+- **Syncs NFT ownership to VM GECOS fields:** When an NFT transfer is detected (owner address on-chain differs from `owner_wallet` in vms.json), the reconciler: (1) updates `owner_wallet` in vms.json, (2) calls provisioner `update-gecos` command to update the VM's GECOS field. Failed GECOS updates are tracked via `gecos_synced` flag and retried on subsequent cycles. This is the sole mechanism by which VMs learn about ownership changes. libpam-web3 verifies signatures against the GECOS-stored wallet address — no chain queries at auth time.
 
 **Config reads:** `web3-defaults.yaml` (nft_contract), `blockhost.yaml` (fallback)
 
@@ -659,7 +614,7 @@ Automated financial operations, integrated into the monitor polling loop.
 ### Hot Wallet
 
 Auto-generated on first fund cycle if not in addressbook:
-- Root agent `generate-wallet` action creates `/etc/blockhost/hot.key` (chmod 600)
+- Root agent `generate-wallet` action creates `/etc/blockhost/hot.key` (chmod 640)
 - Added to addressbook as `hot` with keyfile path
 - Acts as intermediary — contract funds flow through hot wallet before distribution
 
@@ -802,6 +757,7 @@ admin:
 
 | File | What | Written by |
 |------|------|-----------|
+| `/var/lib/blockhost/pipeline.json` | Pipeline state: active entry, queue, token counter, history | Pipeline executor (monitor) |
 | `/var/lib/blockhost/fund-manager-state.json` | Last run timestamps, hot wallet status | Fund-manager |
 | `/var/lib/blockhost/vms.json` | VM database (NFT reconciliation updates) | Reconcile module |
 | `/etc/blockhost/addressbook.json` | Hot wallet entry (via root agent) | Fund-manager, ab CLI |
@@ -913,14 +869,18 @@ WantedBy=multi-user.target
 
 **Installed to:** `/lib/systemd/system/blockhost-monitor.service`
 
-### Package: `blockhost-engine`
+### Package: `blockhost-engine-evm`
 
-**Name:** `blockhost-engine_<version>_all.deb`
+**Name:** `blockhost-engine-evm_<version>_all.deb`
 
 **Dependencies:**
 ```
-Depends: blockhost-common (>= 0.1.0), libpam-web3-tools (>= 0.5.0), nodejs (>= 18), python3 (>= 3.10)
+Depends: blockhost-common (>= 0.1.0), nodejs (>= 18), python3 (>= 3.10)
+Provides: pam-web3-tool
+Conflicts: libpam-web3-tools
 ```
+
+> `libpam-web3-tools` is deprecated. The engine package ships `bhcrypt` directly.
 
 ### Installed File Locations
 
@@ -936,19 +896,41 @@ Depends: blockhost-common (>= 0.1.0), libpam-web3-tools (>= 0.5.0), nodejs (>= 1
 | Contract deployer | `/usr/bin/blockhost-deploy-contracts` — PLANNED |
 | NFT minter (Python) | `/usr/bin/blockhost-mint-nft` |
 | NFT minter (module) | `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` |
-| Init script | `/usr/bin/blockhost-init` — DEPRECATION PLANNED |
 | Signup generator | `/usr/bin/blockhost-generate-signup` |
 | Signup template | `/usr/share/blockhost/signup-template.html` |
 | Wizard plugin | `/usr/lib/python3/dist-packages/blockhost/engine_evm/` — PLANNED |
+| Crypto tool | `/usr/bin/bhcrypt` |
+| NFT contract artifact | `/usr/share/blockhost/contracts/AccessCredentialNFT.json` |
+| NFT contract source | `/usr/share/blockhost/contracts/AccessCredentialNFT.sol` |
 | Contract source | `/opt/blockhost/contracts/BlockhostSubscriptions.sol` |
 | Contract artifact | `/usr/share/blockhost/contracts/BlockhostSubscriptions.json` |
 | Deploy scripts | `/opt/blockhost/scripts/deploy.ts`, `create-plan.ts` |
+| Root agent action: wallet | `/usr/share/blockhost/root-agent-actions/wallet.py` |
 | Systemd unit | `/lib/systemd/system/blockhost-monitor.service` |
 | Env example | `/opt/blockhost/.env.example` |
 
+### Engine-Provided Root Agent Actions
+
+Engines must ship chain-specific root agent action plugins to `/usr/share/blockhost/root-agent-actions/`. The root agent (from common) loads these automatically via plugin discovery.
+
+**Required action:**
+
+| Action | Params | Returns | Purpose |
+|--------|--------|---------|---------|
+| `generate-wallet` | `{name: str}` | `{ok, address, keyfile}` | Generate chain-specific keypair, write keyfile, add to addressbook |
+
+The handler must:
+1. Validate name (short alphanumeric, reject reserved names: `admin`, `server`, `hot`, `dev`, `broker`)
+2. Generate a private key (chain-specific derivation)
+3. Write to `/etc/blockhost/<name>.key` (root:blockhost, 0640)
+4. Derive the on-chain address from the private key
+5. Add entry to `/etc/blockhost/addressbook.json` with `address` and `keyfile`
+
+**Consumer:** Fund manager hot wallet auto-generation.
+
 ### Package Naming Convention (chain variants)
 
-The current package is `blockhost-engine` (EVM). Future chain-specific variants should follow `blockhost-engine-<chain>` (e.g., `blockhost-engine-opnet`). Engine packages should declare `Conflicts:` with each other — only one engine can be active per host.
+The EVM package is `blockhost-engine-evm`. All engine packages follow the `blockhost-engine-<chain>` naming convention (e.g., `blockhost-engine-opnet`). Engine packages should declare `Conflicts:` with each other — only one engine can be active per host.
 
 ---
 
@@ -996,22 +978,49 @@ The engine contributes a blockchain configuration page and finalization steps to
 
 The installer's `blockchain.html` wizard page and all chain-specific finalization steps (`_finalize_keypair`, `_finalize_wallet`, `_finalize_contracts`, `_finalize_config` chain fields, `_finalize_mint_nft`, `_create_default_plan`) currently live in the installer repo with hardcoded EVM assumptions. Moving them to the engine makes the installer chain-agnostic.
 
-### Engine Manifest Extension
+### Engine Manifest Schema
 
-Add to a new engine manifest file (analogous to `provisioner.json`):
+**Installed to:** `/usr/share/blockhost/engine.json`
 
 ```json
 {
   "name": "evm",
   "version": "0.1.0",
-  "display_name": "EVM (Ethereum/Base/Sepolia)",
+  "display_name": "EVM (Ethereum/Polygon)",
 
   "setup": {
+    "first_boot_hook": "/usr/share/blockhost/engine-hooks/first-boot.sh",
     "wizard_module": "blockhost.engine_evm.wizard",
-    "finalization_steps": ["keypair", "wallet", "contracts", "config", "mint_nft", "plan", "signup"]
-  }
+    "finalization_steps": ["wallet", "contracts", "chain_config"],
+    "post_finalization_steps": ["mint_nft", "plan", "revenue_share"]
+  },
+
+  "config_keys": {
+    "session_key": "blockchain"
+  },
+
+  "constraints": { "..." }
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | yes | Machine-readable ID. |
+| `version` | string | yes | Package version (semver). |
+| `display_name` | string | yes | Shown in wizard UI. |
+| `setup.first_boot_hook` | string | no | Absolute path to first-boot hook script. Called after engine .deb and Node.js are installed. Installs engine-specific host dependencies (e.g. Foundry for EVM). Exit 0 = success, non-zero = fatal. Inherits `STATE_DIR` and `LOG_FILE` env vars. |
+| `setup.wizard_module` | string | yes | Python module path for dynamic import. |
+| `setup.finalization_steps` | list | yes | Ordered step IDs run during wizard finalization. |
+| `setup.post_finalization_steps` | list | yes | Steps run after main finalization (mint, plan, etc). |
+| `config_keys.session_key` | string | yes | Flask session key where wizard stores engine config. |
+
+### Consumers
+
+| Consumer | File | What it reads |
+|----------|------|---------------|
+| First-boot | `scripts/first-boot.sh` | `setup.first_boot_hook` — runs it after engine install. Absent = skip. |
+| Installer/wizard | `installer/web/app.py` | `setup.wizard_module`, `setup.finalization_steps`, `config_keys.session_key`, `display_name`, `constraints` |
+| Admin panel | `admin/auth.py`, `admin/system.py` | `constraints` (format validation) |
 
 ### `constraints` (manifest key)
 
@@ -1047,12 +1056,54 @@ Same pattern as provisioner wizard plugin:
 | `get_summary_data(session)` | function | `-> dict` |
 | `get_summary_template()` | function | `-> str` |
 
+### Optional Exports (Wallet Page)
+
+| Export | Type | Signature | Purpose |
+|--------|------|-----------|---------|
+| `get_wallet_template()` | function | `-> Optional[str]` | Custom wallet connect template path (e.g. `"engine_evm/wallet.html"`) |
+| `validate_signature(sig)` | function | `str -> bool` | Signature format validation (called by installer on wallet POST and config restore) |
+| `decrypt_config(sig, ciphertext)` | function | `(str, str) -> dict` | Decrypt config backup file; returns parsed dict. Raise exception on failure |
+| `encrypt_config(sig, plaintext)` | function | `(str, str) -> str` | Encrypt config for backup download; returns hex ciphertext string. Raise exception on failure |
+
+If absent, the installer accepts any non-empty signature and falls back to `bhcrypt` for encrypt/decrypt operations.
+
+### Wallet Page POST Contract
+
+Engine wallet templates MUST POST to the `wizard_wallet` endpoint with three form fields:
+
+| Field | Session key | Description |
+|-------|-------------|-------------|
+| `admin_wallet` | `admin_wallet` | Wallet address (format per engine's `validate_address()`) |
+| `admin_signature` | `admin_signature` | Signature bytes (format engine-specific) |
+| `public_secret` | `admin_public_secret` | The message that was signed |
+
+**Downstream consumers** of these session values:
+- `_gather_session_config()` — passes all three to finalization steps
+- `_finalize_complete()` — writes `admin_signature` to `/etc/blockhost/admin-signature.key`
+- Engine's `finalize_mint_nft()` — uses signature for NFT credential encryption (symmetric key derived from signature)
+- `api_restore_config()` — uses signature for config backup decryption
+
+### Config Backup Contract
+
+**Decryption** (`decrypt_config`): Receives raw signature and ciphertext strings from the uploaded `.enc` file. Must return a parsed dict (YAML-decoded config). Raise an exception on failure — the installer catches it and returns a 400/500 to the client.
+
+**Encryption** (`encrypt_config`): Receives the admin signature and YAML-serialized config plaintext. Must return a hex ciphertext string suitable for download as a `.enc` file. The ciphertext must be decryptable by `decrypt_config` with the same signature.
+
+Without these exports, the installer falls back to shelling out to `bhcrypt encrypt-symmetric` / `decrypt-symmetric`.
+
+### Crypto Tool Ownership
+
+The engine ships its own crypto CLI tool (EVM: `bhcrypt`, a Python port of the former `pam_web3_tool`). The tool provides chain-specific crypto operations: keypair generation, ECIES encryption/decryption, symmetric encrypt/decrypt, and address derivation. Each engine ships the appropriate implementation for its chain's cryptographic primitives.
+
+The `libpam-web3-tools` package is deprecated — its contents (crypto binary, NFT contract artifacts) are now engine-owned.
+
 ### What Moves to Engine
 
 | Current location | Moves to |
 |-----------------|----------|
+| `installer/web/templates/wizard/wallet.html` | Engine wallet template (done) |
 | `installer/web/templates/wizard/blockchain.html` | Engine wizard template |
-| `installer/web/finalize.py` → `_finalize_keypair` | Engine finalization step |
+| `installer/web/finalize.py` → `_finalize_keypair` | Engine finalization step (done — uses `bhcrypt`) |
 | `installer/web/finalize.py` → `_finalize_wallet` | Engine finalization step (calls `ab new server`) |
 | `installer/web/finalize.py` → `_finalize_contracts` | Engine finalization step (calls `blockhost-deploy-contracts`) |
 | `installer/web/finalize.py` → `_finalize_mint_nft` | Engine finalization step (calls `blockhost-mint-nft` + `bw set encrypt`) |
@@ -1070,7 +1121,125 @@ Same pattern as provisioner wizard plugin:
 
 ---
 
-## 11. Known Issues & Abstraction Debt
+## 11. Subscription Pipeline
+
+The subscription handler uses a pipeline state machine with defined stages, persistent state, automatic retry, and crash recovery. All subscription-create operations are serialized through a single pipeline — no concurrent provisioning or minting.
+
+### State File
+
+**Location:** `/var/lib/blockhost/pipeline.json`
+**Owner:** `blockhost:blockhost`
+**Written by:** Pipeline executor (monitor process)
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `next_token_id` | `number` | Local counter replacing `totalSupply()` queries. `-1` = needs initialization from chain. |
+| `active` | `PipelineEntry \| null` | Currently executing pipeline entry |
+| `queue` | `QueuedEvent[]` | Subscription events waiting for active pipeline to finish |
+| `pipeline_busy` | `boolean` | Blocks reconciler and fund-manager when true |
+| `history` | `CompletedPipeline[]` | Last 50 completed pipelines (debugging/auditing) |
+
+### Pipeline Stages
+
+Each stage name represents a completed action. Resume executes the *next* stage after the last completed one.
+
+```
+received → decrypted → token_reserved → vm_created → encrypted → nft_minted → db_updated → complete
+```
+
+| Stage | Action | Timeout |
+|-------|--------|---------|
+| `received` | Event parsed, pipeline entry created | — |
+| `decrypted` | `userEncrypted` decrypted to user signature via server private key | 10s |
+| `token_reserved` | Local `next_token_id` incremented and persisted, `reserveNftTokenId()` called in common DB | 10s |
+| `vm_created` | Provisioner `create` command executed, JSON summary parsed (ip, vmid, username) | 10min |
+| `encrypted` | Connection details encrypted with user's signature (symmetric AES-GCM) | 10s |
+| `nft_minted` | `blockhost-mint-nft` executed, actual token ID parsed from stdout and compared with reserved | 15min (OPNet block time) |
+| `db_updated` | `markNftMinted()` awaited (not fire-and-forget). If token ID mismatch: reservation corrected in DB, GECOS updated via provisioner `update-gecos` | 10s |
+| `complete` | Entry moved to `history`, `pipeline_busy` cleared, queue drained | — |
+
+### Token ID Management
+
+The engine maintains a local `next_token_id` counter in `pipeline.json`, replacing the previous `totalSupply()` query on every subscription. This eliminates the race where a mint is broadcast but not yet confirmed, causing the next handler to read stale supply.
+
+- **Initialization:** On first startup (`next_token_id == -1`), query `totalSupply()` once and set the counter.
+- **Increment:** `token_reserved` stage increments the counter and persists immediately.
+- **Drift correction:** The reconciler compares `next_token_id` with on-chain `totalSupply()` every 5 minutes. If the chain has more tokens (external mints, admin actions), the counter is corrected upward. Never corrected downward.
+- **Mismatch detection:** After minting, the actual token ID from `blockhost-mint-nft` stdout is compared with the reserved ID. If they differ, the `db_updated` stage: (1) marks the old reservation as failed, (2) creates a new reservation with the actual ID and marks it minted, (3) calls provisioner `update-gecos` to fix the VM's GECOS field.
+
+### Concurrency Control
+
+- **Pipeline serialization:** Only one `active` pipeline at a time. New `SubscriptionCreated` events are pushed to `queue` and drained sequentially after the active pipeline completes.
+- **Background task blocking:** When `pipeline_busy == true`, the monitor skips reconciliation, fund cycles, and gas checks. All three are `await`ed (not `.catch()` fire-and-forget) and guarded by `isPipelineBusy()`.
+- **Crash recovery:** On monitor startup, if `active != null`, the pipeline resumes from the next stage after the last completed one.
+
+### Retry
+
+Exponential backoff: 5s base, doubling per attempt, max 3 retries per stage. After exhausting retries, the pipeline stops at the failed stage (`pipeline_busy` set to `false` so background tasks resume). Manual intervention required to advance or abort.
+
+On VM create failure after token reservation: the reservation is marked failed (`mark_nft_failed`) only on final retry exhaustion, not on individual retry failures.
+
+### Serialization with Other Event Types
+
+`SubscriptionExtended` and `SubscriptionCancelled` do NOT go through the pipeline — they're simple DB updates and provisioner calls with no multi-step state to protect. They continue to be handled inline by the monitor.
+
+### Both-Engines-Must-Implement
+
+Both `blockhost-engine-evm` (EVM) and `blockhost-engine-opnet` (OPNet) must implement this pipeline with the same stage names and state file schema. Chain-specific differences: timeouts (EVM ~12s block time → shorter mint timeout), provider library (ethers vs opnet), transaction model (nonce vs UTXO).
+
+---
+
+## 13. Auth Service Ownership
+
+The signing page HTTPS server (`web3-auth-svc`) is **engine-owned**. Signature processing is chain-specific (EVM uses ecrecover, OPNet validates OTP + wallet address), so the engine ships the auth-svc binary, signing page HTML, and systemd unit.
+
+### Deployment
+
+The engine produces a **template package** (installed on VMs, not the host) containing:
+
+| File | Purpose |
+|------|---------|
+| `/usr/bin/web3-auth-svc` | HTTPS signing server binary |
+| `/usr/share/blockhost/signing-page/index.html` | Signing page HTML |
+| `/lib/systemd/system/web3-auth-svc.service` | Systemd unit |
+
+This package goes into `packages/template/` alongside `libpam-web3` and is installed into VM base images during template build.
+
+### Interface with libpam-web3
+
+The auth-svc and PAM module communicate via `.sig` files — the same mechanism as before. The contract:
+
+| Component | Writes | Reads |
+|-----------|--------|-------|
+| `web3-auth-svc` | `/run/libpam-web3/pending/<session_id>.sig` | Session files from PAM |
+| PAM module | `/run/libpam-web3/pending/<session_id>` (session file) | `.sig` file content |
+
+**Content-based signature detection** (in PAM):
+- Raw hex (`0x` + 130 hex chars) → EVM path (ecrecover)
+- JSON `{"otp", "machine_id", "wallet_address"}` → OPNet path (OTP validation)
+
+**Callback mode activation**: PAM enables callback mode when `callback_enabled = true` in config AND the session directory exists (`/run/libpam-web3/pending/`). If no auth-svc is running (no session directory), PAM falls back to manual paste mode. The PAM module does not depend on the auth-svc binary — only on the file protocol.
+
+### What stays in libpam-web3
+
+- PAM module (`pam_web3.so`) — signature detection, GECOS lookup, OTP generation
+- Callback plumbing — session file creation, `.sig` file reading
+- TLS certificate directory structure (`/etc/libpam-web3/tls/`)
+- Config file (`/etc/pam_web3/config.toml`)
+
+### What moves to engine
+
+- `web3-auth-svc` binary and systemd unit
+- Signing page HTML
+- Auth-svc config (`/etc/web3-auth/config.toml`) — written by cloud-init template, references engine-provided binary
+
+### Cloud-init template impact
+
+The `nft-auth.yaml` template still writes the auth-svc config and enables the service. No template changes needed — the binary just comes from a different package. The template is engine-agnostic; it references paths that both EVM and OPNet auth-svc packages provide.
+
+---
+
+## 14. Known Issues & Abstraction Debt
 
 ### ~~`cast` used directly by installer and admin~~ (PLANNED)
 
@@ -1092,15 +1261,15 @@ Chain-specific finalization steps move to engine wizard plugin (§10). The insta
 
 ### `mint_nft.py` dual install path (OPEN)
 
-Installed as both `/usr/bin/blockhost-mint-nft` (CLI) and `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` (importable module). The monitor calls it as a CLI; the installer imports it as Python. Both paths must work. With the engine wizard plugin, the Python import path is used by the engine's own finalization step (same submodule), reducing the cross-boundary concern.
+Installed as `/usr/bin/blockhost-mint-nft` (CLI). The monitor calls it as a CLI; the engine wizard finalization calls it as a CLI. The EVM engine also installs it as `/usr/lib/python3/dist-packages/blockhost/mint_nft.py` (importable module). The OPNet engine's mint script is TypeScript (`npx tsx`).
 
 ### Hardcoded chain configs in `chain-pools.ts` (OPEN)
 
 Uniswap V2 router addresses, WETH addresses, and pair addresses are hardcoded per chain ID. Adding a new EVM chain requires code changes. Should be configurable (in `blockhost.yaml` or `web3-defaults.yaml`).
 
-### No BLOCK_TIME constant (OPEN)
+### ~~No BLOCK_TIME constant~~ (RESOLVED)
 
-Monitor polling intervals (5s event poll, 5min reconcile, 30min gas check, 24h fund cycle) are hardcoded or configured in seconds/minutes/hours. A chain-specific `BLOCK_TIME` constant could scale these intervals relative to block production speed, making them meaningful across chains with different block times.
+Monitor and reconciler are engine-internal processes. Each engine is built for a specific blockchain and knows its own block time — no cross-boundary constant needed. The engine sets whatever polling intervals make sense for its chain internally.
 
 ### ~~Signup page placeholders are EVM-specific~~ (PLANNED)
 
