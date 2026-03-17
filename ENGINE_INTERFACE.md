@@ -443,6 +443,8 @@ blockhost-generate-signup \
 
 ## 2. Smart Contract Interface
 
+> **Scope note:** Sections 2–4 describe engine-internal semantics, not cross-boundary contracts. The function signatures below reflect the EVM/OPNet account-model pattern. UTXO-based engines (Cardano, Ergo) satisfy the same *external behavior* (plans exist, subscriptions are purchasable, funds are collectible) through different mechanisms (validator spending conditions, UTXO scanning, batch collection transactions). The portable interface boundary is the CLI commands in §1 and the monitor output behavior in §3 (triggers create/extend/destroy via provisioner CLI). Setup-only commands (`bw plan create`, `bw config stable`, `blockhost-deploy-contracts`) and revenue collection (`withdrawFunds`) are engine-internal — no other module calls them during normal operation.
+
 The subscription contract manages plans, subscriptions, and payment methods. Any chain adapter must implement equivalent semantics.
 
 ### Abstract Functions
@@ -1191,7 +1193,7 @@ Both `blockhost-engine-evm` (EVM) and `blockhost-engine-opnet` (OPNet) must impl
 
 ## 13. Auth Service Ownership
 
-The signing page HTTPS server (`web3-auth-svc`) is **engine-owned**. Signature processing is chain-specific (EVM uses ecrecover, OPNet validates OTP + wallet address), so the engine ships the auth-svc binary, signing page HTML, and systemd unit.
+The signing page HTTPS server (`web3-auth-svc`) is **engine-owned**. Signature processing is chain-specific (EVM uses ecrecover, OPNet validates OTP + wallet, Cardano uses Ed25519 with public key), so the engine ships the auth-svc binary, signing page HTML, and systemd unit.
 
 ### Deployment
 
@@ -1202,28 +1204,68 @@ The engine produces a **template package** (installed on VMs, not the host) cont
 | `/usr/bin/web3-auth-svc` | HTTPS signing server binary |
 | `/usr/share/blockhost/signing-page/index.html` | Signing page HTML |
 | `/lib/systemd/system/web3-auth-svc.service` | Systemd unit |
+| `/usr/lib/libpam-web3/verify.so` | Chain-specific verification plugin for PAM |
 
 This package goes into `packages/template/` alongside `libpam-web3` and is installed into VM base images during template build.
 
 ### Interface with libpam-web3
 
-The auth-svc and PAM module communicate via `.sig` files — the same mechanism as before. The contract:
+The auth-svc and PAM module communicate via `.sig` files. The PAM module reads the `.sig` file, extracts the `chain` field, and delegates verification to the appropriate plugin.
 
 | Component | Writes | Reads |
 |-----------|--------|-------|
 | `web3-auth-svc` | `/run/libpam-web3/pending/<session_id>.sig` | Session files from PAM |
 | PAM module | `/run/libpam-web3/pending/<session_id>` (session file) | `.sig` file content |
 
-**Content-based signature detection** (in PAM):
-- Raw hex (`0x` + 130 hex chars) → EVM path (ecrecover)
-- JSON `{"otp", "machine_id", "wallet_address"}` → OPNet path (OTP validation)
+### `.sig` file format (MANDATORY)
+
+All engines must write `.sig` files as structured JSON with a mandatory `chain` identifier:
+
+```json
+{
+  "chain": "<engine identifier>",
+  "signature": "<chain-specific signature data>",
+  ...additional chain-specific fields
+}
+```
+
+The `chain` field is **required** and determines which verification plugin PAM invokes. Additional fields are chain-specific:
+
+| Chain | `chain` value | Required fields | Notes |
+|-------|---------------|-----------------|-------|
+| EVM | `"evm"` | `signature` (0x-prefixed hex, 130 chars) | ecrecover derives address from signature |
+| OPNet | `"opnet"` | `signature`, `public_key`, `otp`, `machine_id` | All base64-encoded |
+| Cardano | `"cardano"` | `signature`, `public_key`, `otp`, `machine_id` | COSE structures from CIP-30 `signData` |
+
+**Breaking change:** This replaces the previous content-based detection (raw hex = EVM, JSON = OPNet). Both EVM and OPNet auth-svc implementations must adopt the structured format.
+
+**Why:** Content-based detection becomes fragile as chains are added. Cardano (Ed25519) requires the public key alongside the signature for verification — there is no key recovery as in secp256k1. CIP-30 `signData` returns both (`{ signature, key }` as COSE structures). The `chain` field makes dispatch explicit and extensible.
 
 **Callback mode activation**: PAM enables callback mode when `callback_enabled = true` in config AND the session directory exists (`/run/libpam-web3/pending/`). If no auth-svc is running (no session directory), PAM falls back to manual paste mode. The PAM module does not depend on the auth-svc binary — only on the file protocol.
 
+### Verification Plugin Interface
+
+The engine ships a chain-specific verification plugin as a shared object. PAM `dlopen`s the plugin at the well-known path and delegates identity verification.
+
+**Plugin path:** `/usr/lib/libpam-web3/verify.so`
+
+**Plugin receives:**
+- The `.sig` file content (structured JSON per above)
+- The wallet address from GECOS (`wallet=<addr>`)
+- The OTP message that was signed
+
+**Plugin returns:** pass (0) / fail (non-zero)
+
+**Responsibility split:**
+- **auth-svc** verifies structural validity: is the signature real and over the correct OTP?
+- **Verification plugin** verifies identity: does this key/signature belong to the wallet in GECOS?
+
+This keeps libpam-web3 chain-agnostic. The PAM module handles session management, callback plumbing, and GECOS lookup. Chain-specific cryptography lives entirely in the plugin.
+
 ### What stays in libpam-web3
 
-- PAM module (`pam_web3.so`) — signature detection, GECOS lookup, OTP generation
-- Callback plumbing — session file creation, `.sig` file reading
+- PAM module (`pam_web3.so`) — `.sig` file reading, GECOS lookup, OTP generation, plugin dispatch
+- Callback plumbing — session file creation, `.sig` file polling
 - TLS certificate directory structure (`/etc/libpam-web3/tls/`)
 - Config file (`/etc/pam_web3/config.toml`)
 
@@ -1231,11 +1273,12 @@ The auth-svc and PAM module communicate via `.sig` files — the same mechanism 
 
 - `web3-auth-svc` binary and systemd unit
 - Signing page HTML
-- Auth-svc config (`/etc/web3-auth/config.toml`) — written by cloud-init template, references engine-provided binary
+- Verification plugin (`verify.so`)
+- Auth-svc config (`/etc/web3-auth/config.toml`) — written by cloud-init template
 
 ### Cloud-init template impact
 
-The `nft-auth.yaml` template still writes the auth-svc config and enables the service. No template changes needed — the binary just comes from a different package. The template is engine-agnostic; it references paths that both EVM and OPNet auth-svc packages provide.
+The `nft-auth.yaml` template still writes the auth-svc config and enables the service. No template changes needed — the binary and plugin come from the engine's template package. The template is engine-agnostic; it references paths that all engine auth-svc packages provide.
 
 ---
 

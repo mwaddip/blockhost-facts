@@ -290,27 +290,93 @@ Build or update the base VM template/image. What this means is hypervisor-specif
 
 ---
 
-### `metrics` (stub)
+### `metrics`
 
 ```
 blockhost-vm-metrics <name>
 ```
 
-Collect VM resource usage. Currently unimplemented in all provisioners.
+Collect VM resource usage. Called by blockhost-monitor at regular intervals for every active VM. **Must be cheap** — execution cost multiplies by VM count × poll frequency.
 
-**Exit:** 0 (even as stub).
+**stdout (JSON):**
+```json
+{
+  "cpu_percent": 45.2,
+  "cpu_count": 2,
+  "memory_used_mb": 1824,
+  "memory_total_mb": 4096,
+  "disk_used_mb": 12400,
+  "disk_total_mb": 51200,
+  "disk_read_iops": 150,
+  "disk_write_iops": 42,
+  "disk_read_bytes_sec": 6291456,
+  "disk_write_bytes_sec": 1048576,
+  "net_rx_bytes_sec": 1048576,
+  "net_tx_bytes_sec": 524288,
+  "net_connections": 847,
+  "guest_agent_responsive": true,
+  "uptime_seconds": 86400,
+  "state": "running"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cpu_percent` | float | Current CPU utilization (0–100 × vCPU count, e.g. 200 = 2 cores at 100%) |
+| `cpu_count` | int | Allocated vCPU count |
+| `memory_used_mb` | int | Current memory usage in MB |
+| `memory_total_mb` | int | Allocated memory in MB |
+| `disk_used_mb` | int | Disk space used in MB (requires guest agent) |
+| `disk_total_mb` | int | Disk space allocated in MB |
+| `disk_read_iops` | int | Disk read operations per second (sampled) |
+| `disk_write_iops` | int | Disk write operations per second (sampled) |
+| `disk_read_bytes_sec` | int | Disk read throughput in bytes/sec |
+| `disk_write_bytes_sec` | int | Disk write throughput in bytes/sec |
+| `net_rx_bytes_sec` | int | Network receive throughput in bytes/sec |
+| `net_tx_bytes_sec` | int | Network transmit throughput in bytes/sec |
+| `net_connections` | int | Active network connections (requires guest agent, -1 if unavailable) |
+| `guest_agent_responsive` | bool | Whether the QEMU guest agent responds |
+| `uptime_seconds` | int | VM uptime in seconds |
+| `state` | string | VM state: `running`, `paused`, `stopped`, `unknown` |
+
+**Implementation notes:**
+- Fields that require the guest agent (`disk_used_mb`, `net_connections`) should return -1 or a sensible default when the agent is unresponsive. Never block or timeout waiting for the agent.
+- Rate-based fields (IOPS, bytes/sec) are sampled over a short window or derived from cumulative counters with delta calculation. The provisioner may cache the previous sample internally.
+- libvirt: `virsh domstats`, `virsh domifstat`, `virsh qemu-agent-command`
+- Proxmox: `/api2/json/nodes/{node}/qemu/{vmid}/status/current`, RRD data
+
+**Exit:** 0 on success. 1 if the VM does not exist or cannot be queried (stderr has reason).
 
 ---
 
-### `throttle` (stub)
+### `throttle`
 
 ```
-blockhost-vm-throttle <name>
+blockhost-vm-throttle <name> [options]
 ```
 
-Apply resource limits. Currently unimplemented in all provisioners.
+Apply or remove resource limits on a running VM. Called by blockhost-monitor when enforcement action is needed.
 
-**Exit:** 0 (even as stub).
+| Option | Type | Description |
+|--------|------|-------------|
+| `--cpu-shares <int>` | int | CPU weight (1–10000, default 1024). Lower = less CPU time. |
+| `--cpu-quota <percent>` | int | Hard CPU cap as percentage of allocated vCPUs (1–100). 50 = half speed. |
+| `--bandwidth-in <kbps>` | int | Inbound bandwidth limit in kbps. 0 = unlimited. |
+| `--bandwidth-out <kbps>` | int | Outbound bandwidth limit in kbps. 0 = unlimited. |
+| `--iops-read <int>` | int | Read IOPS limit. 0 = unlimited. |
+| `--iops-write <int>` | int | Write IOPS limit. 0 = unlimited. |
+| `--reset` | flag | Remove all throttling, restore defaults. |
+
+Options are additive — only specified limits are changed. Unspecified limits remain at their current value.
+
+**Implementation notes:**
+- CPU: cgroup cpu.cfs_quota_us / cpu.shares (libvirt), Proxmox API `cpulimit`/`cpuunits`
+- Bandwidth: tc/nftables traffic shaping (libvirt), PVE firewall bandwidth limits (Proxmox)
+- IOPS: blkio cgroup (libvirt), Proxmox storage IO limits
+- `--reset` removes all previously applied limits, restoring the VM to its creation-time defaults
+
+**stdout:** Confirmation of applied limits (one line per change).
+**Exit:** 0 on success, 1 on failure.
 
 ---
 
@@ -623,9 +689,9 @@ Documented for awareness. These exist in the current implementation.
 
 `app.py` line 637 has a hardcoded Proxmox dict as fallback when no provisioner module is loaded. This should be removed — no-provisioner is not a valid state, and the hardcoded dict actively poisons custom provisioner development.
 
-### Stub commands in manifest
+### ~~Stub commands in manifest~~ (RESOLVED)
 
-`vm-metrics` and `vm-throttle` are declared in the manifest but return "not yet implemented" on stderr. Consumers get exit 0 with no useful output. Currently harmless — no consumer calls these yet.
+~~`vm-metrics` and `vm-throttle` are declared in the manifest but return "not yet implemented" on stderr.~~ Resolved: full specs added to sections 2.12 and 2.13. Implementation pending in both provisioners.
 
 ### Contract doc drift
 
