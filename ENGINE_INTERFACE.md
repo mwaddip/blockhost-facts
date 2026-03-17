@@ -1204,7 +1204,6 @@ The engine produces a **template package** (installed on VMs, not the host) cont
 | `/usr/bin/web3-auth-svc` | HTTPS signing server binary |
 | `/usr/share/blockhost/signing-page/index.html` | Signing page HTML |
 | `/lib/systemd/system/web3-auth-svc.service` | Systemd unit |
-| `/usr/lib/libpam-web3/verify.so` | Chain-specific verification plugin for PAM |
 
 This package goes into `packages/template/` alongside `libpam-web3` and is installed into VM base images during template build.
 
@@ -1250,28 +1249,13 @@ The `chain` field determines which verification plugin PAM invokes. Additional f
 
 **Callback mode activation**: PAM enables callback mode when `callback_enabled = true` in config AND the session directory exists (`/run/libpam-web3/pending/`). If no auth-svc is running (no session directory), PAM falls back to manual paste mode. The PAM module does not depend on the auth-svc binary — only on the file protocol.
 
-### Verification Plugin Interface
+### Verification
 
-The engine ships a chain-specific verification plugin as a shared object. PAM `dlopen`s the plugin at the well-known path and delegates identity verification.
-
-**Plugin path:** `/usr/lib/libpam-web3/verify.so`
-
-**Plugin receives:**
-- The `.sig` file content (structured JSON per above)
-- The wallet address from GECOS (`wallet=<addr>`)
-- The OTP message that was signed
-
-**Plugin returns:** pass (0) / fail (non-zero)
-
-**Responsibility split:**
-- **auth-svc** verifies structural validity: is the signature real and over the correct OTP?
-- **Verification plugin** verifies identity: does this key/signature belong to the wallet in GECOS?
-
-This keeps libpam-web3 chain-agnostic. The PAM module handles session management, callback plumbing, and GECOS lookup. Chain-specific cryptography lives entirely in the plugin.
+Signature verification is owned by **libpam-web3**, not the engine. The engine's responsibility ends at writing the correctly formatted `.sig` file. libpam-web3 maintains its own chain-specific verification plugins and specs — see the libpam-web3 documentation for the plugin interface.
 
 ### What stays in libpam-web3
 
-- PAM module (`pam_web3.so`) — `.sig` file reading, GECOS lookup, OTP generation, plugin dispatch
+- PAM module (`pam_web3.so`) — `.sig` file reading, GECOS lookup, OTP generation, chain-specific verification plugins
 - Callback plumbing — session file creation, `.sig` file polling
 - TLS certificate directory structure (`/etc/libpam-web3/tls/`)
 - Config file (`/etc/pam_web3/config.toml`)
@@ -1280,7 +1264,6 @@ This keeps libpam-web3 chain-agnostic. The PAM module handles session management
 
 - `web3-auth-svc` binary and systemd unit
 - Signing page HTML
-- Verification plugin (`verify.so`)
 - Auth-svc config (`/etc/web3-auth/config.toml`) — written by cloud-init template
 
 ### Cloud-init template impact
