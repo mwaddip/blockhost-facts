@@ -1193,40 +1193,13 @@ Both `blockhost-engine-evm` (EVM) and `blockhost-engine-opnet` (OPNet) must impl
 
 ## 13. Auth Service & Signing Pages
 
-Auth-svc, signing pages, and signature verification are **owned by libpam-web3 and its chain plugins** — not by the engine.
+Auth-svc, signing pages, and signature verification are **owned by libpam-web3 and its chain plugins** (`libpam-web3-<chain>`) — not by the engine.
 
-Each chain is supported by a libpam-web3 plugin package (`libpam-web3-<chain>`) which ships:
-- Auth-svc binary and systemd unit
-- Signing page HTML
-- Signature verification logic
-
-These plugin packages are installed into VM templates alongside `libpam-web3`. The engine does not ship auth-related binaries or templates. The engine's role is limited to:
+The engine's role is limited to:
 - Declaring which chain it uses (via `engine.json` → `name` field)
-- The build system ensuring the matching `libpam-web3-<chain>` plugin is included in the template
+- The build system ensuring the matching `libpam-web3-<chain>` plugin is included in the VM template
 
-### `.sig` file format
-
-The `.sig` file is the contract between auth-svc (from the plugin) and PAM. Format depends on chain:
-
-| Chain | Format | Fields | Notes |
-|-------|--------|--------|-------|
-| EVM | Raw hex | `0x` + 130 hex chars (no JSON) | Legacy path, ecrecover built into PAM |
-| OPNet | JSON | `chain`, `wallet_address`, `otp`, `machine_id` | OPNet verifies via OTP + wallet match |
-| Cardano | JSON | `chain`, `signature`, `public_key`, `otp`, `machine_id` | Ed25519, COSE structures from CIP-30 |
-
-For structured (non-EVM) formats, the `chain` field is mandatory and determines which verification plugin PAM invokes.
-
-### Multi-chain support
-
-A single libpam-web3 installation can support multiple chains simultaneously. Multiple plugin packages can coexist — PAM routes to the correct plugin based on `.sig` content (raw hex → EVM, JSON `chain` field → plugin dispatch). Only the GECOS field matters for identity (`wallet=<address>`).
-
-### What the engine does NOT own
-
-- Auth-svc binary, signing page, systemd unit (owned by `libpam-web3-<chain>`)
-- Signature verification logic (owned by `libpam-web3-<chain>`)
-- PAM module, callback plumbing, session management (owned by `libpam-web3`)
-
-See `libpam-web3` documentation for the plugin interface specification.
+See `libpam-web3` documentation for the plugin interface, `.sig` file format, and verification spec.
 
 ---
 
