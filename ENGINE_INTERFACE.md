@@ -1236,7 +1236,7 @@ The `chain` field determines which verification plugin PAM invokes. Additional f
 | Chain | Format | Required fields | Notes |
 |-------|--------|-----------------|-------|
 | EVM | Raw hex | `0x` + 130 hex chars (no JSON) | Legacy path, ecrecover built into PAM |
-| OPNet | JSON | `chain`, `public_key`, `otp`, `machine_id` | All base64-encoded. No signature field — OPNet verifies via OTP + wallet match. |
+| OPNet | JSON | `chain`, `wallet_address`, `otp`, `machine_id` | No signature field — OPNet verifies via OTP + wallet match. |
 | Cardano | JSON | `chain`, `signature`, `public_key`, `otp`, `machine_id` | COSE structures from CIP-30 `signData` |
 
 **PAM detection logic:**
