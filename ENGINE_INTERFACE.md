@@ -1217,9 +1217,13 @@ The auth-svc and PAM module communicate via `.sig` files. The PAM module reads t
 | `web3-auth-svc` | `/run/libpam-web3/pending/<session_id>.sig` | Session files from PAM |
 | PAM module | `/run/libpam-web3/pending/<session_id>` (session file) | `.sig` file content |
 
-### `.sig` file format (MANDATORY)
+### `.sig` file format
 
-All engines must write `.sig` files as structured JSON with a mandatory `chain` identifier:
+PAM detects the `.sig` format using a two-path approach:
+
+**Legacy path (EVM):** Raw hex string (`0x` + 130 hex chars). PAM detects this by content and uses the built-in ecrecover verification. The EVM auth-svc writes the raw signature directly — no JSON wrapper, no changes needed. This path is mature and must not be modified.
+
+**Structured path (all other engines):** JSON with a mandatory `chain` identifier:
 
 ```json
 {
@@ -1229,17 +1233,21 @@ All engines must write `.sig` files as structured JSON with a mandatory `chain` 
 }
 ```
 
-The `chain` field is **required** and determines which verification plugin PAM invokes. Additional fields are chain-specific:
+The `chain` field determines which verification plugin PAM invokes. Additional fields are chain-specific:
 
-| Chain | `chain` value | Required fields | Notes |
-|-------|---------------|-----------------|-------|
-| EVM | `"evm"` | `signature` (0x-prefixed hex, 130 chars) | ecrecover derives address from signature |
-| OPNet | `"opnet"` | `signature`, `public_key`, `otp`, `machine_id` | All base64-encoded |
-| Cardano | `"cardano"` | `signature`, `public_key`, `otp`, `machine_id` | COSE structures from CIP-30 `signData` |
+| Chain | Format | Required fields | Notes |
+|-------|--------|-----------------|-------|
+| EVM | Raw hex | `0x` + 130 hex chars (no JSON) | Legacy path, ecrecover built into PAM |
+| OPNet | JSON | `chain`, `signature`, `public_key`, `otp`, `machine_id` | All base64-encoded |
+| Cardano | JSON | `chain`, `signature`, `public_key`, `otp`, `machine_id` | COSE structures from CIP-30 `signData` |
 
-**Breaking change:** This replaces the previous content-based detection (raw hex = EVM, JSON = OPNet). Both EVM and OPNet auth-svc implementations must adopt the structured format.
+**PAM detection logic:**
+1. If content starts with `0x` and is 132 chars → EVM legacy path (built-in ecrecover)
+2. Otherwise parse as JSON, read `chain` field → dispatch to verification plugin
 
-**Why:** Content-based detection becomes fragile as chains are added. Cardano (Ed25519) requires the public key alongside the signature for verification — there is no key recovery as in secp256k1. CIP-30 `signData` returns both (`{ signature, key }` as COSE structures). The `chain` field makes dispatch explicit and extensible.
+**Breaking change for OPNet only:** OPNet must add `"chain": "opnet"` and adopt snake_case field names (`public_key`, `machine_id`). EVM is unaffected.
+
+**Why structured format for new engines:** Cardano (Ed25519) requires the public key alongside the signature for verification — there is no key recovery as in secp256k1. CIP-30 `signData` returns both (`{ signature, key }` as COSE structures). The `chain` field makes dispatch explicit and extensible without content sniffing.
 
 **Callback mode activation**: PAM enables callback mode when `callback_enabled = true` in config AND the session directory exists (`/run/libpam-web3/pending/`). If no auth-svc is running (no session directory), PAM falls back to manual paste mode. The PAM module does not depend on the auth-svc binary — only on the file protocol.
 
