@@ -1191,84 +1191,42 @@ Both `blockhost-engine-evm` (EVM) and `blockhost-engine-opnet` (OPNet) must impl
 
 ---
 
-## 13. Auth Service Ownership
+## 13. Auth Service & Signing Pages
 
-The signing page HTTPS server (`web3-auth-svc`) is **engine-owned**. Signature processing is chain-specific (EVM uses ecrecover, OPNet validates OTP + wallet, Cardano uses Ed25519 with public key), so the engine ships the auth-svc binary, signing page HTML, and systemd unit.
+Auth-svc, signing pages, and signature verification are **owned by libpam-web3 and its chain plugins** — not by the engine.
 
-### Deployment
+Each chain is supported by a libpam-web3 plugin package (`libpam-web3-<chain>`) which ships:
+- Auth-svc binary and systemd unit
+- Signing page HTML
+- Signature verification logic
 
-The engine produces a **template package** (installed on VMs, not the host) containing:
-
-| File | Purpose |
-|------|---------|
-| `/usr/bin/web3-auth-svc` | HTTPS signing server binary |
-| `/usr/share/blockhost/signing-page/index.html` | Signing page HTML |
-| `/lib/systemd/system/web3-auth-svc.service` | Systemd unit |
-
-This package goes into `packages/template/` alongside `libpam-web3` and is installed into VM base images during template build.
-
-### Interface with libpam-web3
-
-The auth-svc and PAM module communicate via `.sig` files. The PAM module reads the `.sig` file, extracts the `chain` field, and delegates verification to the appropriate plugin.
-
-| Component | Writes | Reads |
-|-----------|--------|-------|
-| `web3-auth-svc` | `/run/libpam-web3/pending/<session_id>.sig` | Session files from PAM |
-| PAM module | `/run/libpam-web3/pending/<session_id>` (session file) | `.sig` file content |
+These plugin packages are installed into VM templates alongside `libpam-web3`. The engine does not ship auth-related binaries or templates. The engine's role is limited to:
+- Declaring which chain it uses (via `engine.json` → `name` field)
+- The build system ensuring the matching `libpam-web3-<chain>` plugin is included in the template
 
 ### `.sig` file format
 
-PAM detects the `.sig` format using a two-path approach:
+The `.sig` file is the contract between auth-svc (from the plugin) and PAM. Format depends on chain:
 
-**Legacy path (EVM):** Raw hex string (`0x` + 130 hex chars). PAM detects this by content and uses the built-in ecrecover verification. The EVM auth-svc writes the raw signature directly — no JSON wrapper, no changes needed. This path is mature and must not be modified.
-
-**Structured path (all other engines):** JSON with a mandatory `chain` identifier:
-
-```json
-{
-  "chain": "<engine identifier>",
-  ...chain-specific fields (see table below)
-}
-```
-
-The `chain` field determines which verification plugin PAM invokes. Additional fields are chain-specific:
-
-| Chain | Format | Required fields | Notes |
-|-------|--------|-----------------|-------|
+| Chain | Format | Fields | Notes |
+|-------|--------|--------|-------|
 | EVM | Raw hex | `0x` + 130 hex chars (no JSON) | Legacy path, ecrecover built into PAM |
-| OPNet | JSON | `chain`, `wallet_address`, `otp`, `machine_id` | No signature field — OPNet verifies via OTP + wallet match. |
-| Cardano | JSON | `chain`, `signature`, `public_key`, `otp`, `machine_id` | COSE structures from CIP-30 `signData` |
+| OPNet | JSON | `chain`, `wallet_address`, `otp`, `machine_id` | OPNet verifies via OTP + wallet match |
+| Cardano | JSON | `chain`, `signature`, `public_key`, `otp`, `machine_id` | Ed25519, COSE structures from CIP-30 |
 
-**PAM detection logic:**
-1. If content starts with `0x` and is 132 chars → EVM legacy path (built-in ecrecover)
-2. Otherwise parse as JSON, read `chain` field → dispatch to verification plugin
+For structured (non-EVM) formats, the `chain` field is mandatory and determines which verification plugin PAM invokes.
 
-**Breaking change for OPNet only:** OPNet must add `"chain": "opnet"` and adopt snake_case field names (`public_key`, `machine_id`). EVM is unaffected.
+### Multi-chain support
 
-**Why structured format for new engines:** Cardano (Ed25519) requires the public key alongside the signature for verification — there is no key recovery as in secp256k1. CIP-30 `signData` returns both (`{ signature, key }` as COSE structures). The `chain` field makes dispatch explicit and extensible without content sniffing.
+A single libpam-web3 installation can support multiple chains simultaneously. Multiple plugin packages can coexist — PAM routes to the correct plugin based on `.sig` content (raw hex → EVM, JSON `chain` field → plugin dispatch). Only the GECOS field matters for identity (`wallet=<address>`).
 
-**Callback mode activation**: PAM enables callback mode when `callback_enabled = true` in config AND the session directory exists (`/run/libpam-web3/pending/`). If no auth-svc is running (no session directory), PAM falls back to manual paste mode. The PAM module does not depend on the auth-svc binary — only on the file protocol.
+### What the engine does NOT own
 
-### Verification
+- Auth-svc binary, signing page, systemd unit (owned by `libpam-web3-<chain>`)
+- Signature verification logic (owned by `libpam-web3-<chain>`)
+- PAM module, callback plumbing, session management (owned by `libpam-web3`)
 
-Signature verification is owned by **libpam-web3**, not the engine. The engine's responsibility ends at writing the correctly formatted `.sig` file. libpam-web3 maintains its own chain-specific verification plugins and specs — see the libpam-web3 documentation for the plugin interface.
-
-### What stays in libpam-web3
-
-- PAM module (`pam_web3.so`) — `.sig` file reading, GECOS lookup, OTP generation, chain-specific verification plugins
-- Callback plumbing — session file creation, `.sig` file polling
-- TLS certificate directory structure (`/etc/libpam-web3/tls/`)
-- Config file (`/etc/pam_web3/config.toml`)
-
-### What moves to engine
-
-- `web3-auth-svc` binary and systemd unit
-- Signing page HTML
-- Auth-svc config (`/etc/web3-auth/config.toml`) — written by cloud-init template
-
-### Cloud-init template impact
-
-The `nft-auth.yaml` template still writes the auth-svc config and enables the service. No template changes needed — the binary and plugin come from the engine's template package. The template is engine-agnostic; it references paths that all engine auth-svc packages provide.
+See `libpam-web3` documentation for the plugin interface specification.
 
 ---
 

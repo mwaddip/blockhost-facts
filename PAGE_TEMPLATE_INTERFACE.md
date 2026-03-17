@@ -1,6 +1,8 @@
 # Page Template Interface
 
-Defines the contract between engine JS bundles and user-facing HTML/CSS templates (signing page, signup page). Templates are replaceable — the engine ships a default, anyone can drop in their own as long as it honors this contract.
+Defines the contract between chain-specific JS bundles and user-facing HTML/CSS templates (signing page, signup page). Templates are replaceable — the plugin ships a default, anyone can drop in their own as long as it honors this contract.
+
+> **Ownership:** Signing pages and auth-svc are owned by libpam-web3 chain plugins (`libpam-web3-<chain>`), not by the engine. Signup pages remain engine-owned (they handle subscription purchase logic). This contract applies to both.
 
 ## Separation Principle
 
@@ -15,10 +17,10 @@ The template never contains wallet or chain logic. The bundle never contains lay
 ## Directory Convention
 
 ```
-<engine>/
-  src/auth-svc/signing-page/
+Signing page (in libpam-web3-<chain> plugin):
+  signing-page/
     template.html        ← replaceable (HTML/CSS only)
-    engine.js            ← engine-owned (wallet + signing logic)
+    engine.js            ← plugin-owned (wallet + signing logic)
     index.html           ← generated (template + bundle + variables)
   scripts/
     signup-template.html ← replaceable (HTML/CSS only)
@@ -126,7 +128,7 @@ The template defines what these classes look like. The bundle only toggles them.
 
 ## Signing Page Callback
 
-The engine bundle handles the full callback to auth-svc. The template is not involved — the bundle POSTs the signature to `/auth/callback/{sessionId}` (session ID from URL query parameter).
+The plugin's JS bundle handles the full callback to auth-svc. The template is not involved — the bundle POSTs the signature to `/auth/callback/{sessionId}` (session ID from URL query parameter).
 
 ## Customization Guide
 
