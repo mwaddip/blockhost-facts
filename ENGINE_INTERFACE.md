@@ -878,11 +878,11 @@ WantedBy=multi-user.target
 **Dependencies:**
 ```
 Depends: blockhost-common (>= 0.1.0), nodejs (>= 18), python3 (>= 3.10)
-Provides: pam-web3-tool
-Conflicts: libpam-web3-tools
+Provides: bhcrypt, blockhost-engine
+Conflicts: blockhost-engine
 ```
 
-> `libpam-web3-tools` is deprecated. The engine package ships `bhcrypt` directly.
+> Virtual package pattern: every engine declares `Provides: blockhost-engine` and `Conflicts: blockhost-engine`. A package never conflicts with itself through a virtual package, so this prevents coinstallation without enumerating engine names.
 
 ### Installed File Locations
 
@@ -932,7 +932,7 @@ The handler must:
 
 ### Package Naming Convention (chain variants)
 
-The EVM package is `blockhost-engine-evm`. All engine packages follow the `blockhost-engine-<chain>` naming convention (e.g., `blockhost-engine-opnet`). Engine packages should declare `Conflicts:` with each other — only one engine can be active per host.
+The EVM package is `blockhost-engine-evm`. All engine packages follow the `blockhost-engine-<chain>` naming convention (e.g., `blockhost-engine-opnet`). Engine packages must declare `Provides: blockhost-engine` and `Conflicts: blockhost-engine` — only one engine can be active per host. The virtual package pattern scales to any number of engines without updating existing control files.
 
 ---
 

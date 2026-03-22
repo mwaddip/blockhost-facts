@@ -646,11 +646,14 @@ from blockhost.config import load_db_config, load_web3_config, load_broker_alloc
 
 ### Conflicts
 
-Provisioner packages must declare `Conflicts:` with all other provisioner packages. Only one provisioner can be active per host (the manifest path is a singleton).
+Only one provisioner can be active per host (the manifest path is a singleton). Use the Debian virtual package pattern — every provisioner declares both:
 
 ```
-Conflicts: blockhost-provisioner-proxmox
+Provides: blockhost-provisioner
+Conflicts: blockhost-provisioner
 ```
+
+A package never conflicts with itself through a virtual package, so this prevents coinstallation without enumerating provisioner names. Scales to any number of provisioners without updating existing control files.
 
 ### Install Locations
 
