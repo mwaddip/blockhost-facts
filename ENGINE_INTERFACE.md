@@ -130,10 +130,10 @@ bw withdraw [token] <to>
 
 | Arg | Required | Description |
 |-----|----------|-------------|
-| `token` | no | Token address to withdraw (defaults to primary stablecoin) |
+| `token` | no | Token to withdraw. Account-model chains: token address, defaults to primary stablecoin. UTXO chains: may ignore (withdrawal collects all claimable UTXOs regardless of token). |
 | `to` | yes | Recipient address or role |
 
-Calls `contract.withdrawFunds(token, to)` — moves accumulated tokens from subscription contract to recipient.
+Collects accumulated subscription revenue. Account-model engines call a contract withdraw function. UTXO engines scan for claimable subscription UTXOs (via beacon tokens) and batch-collect them — the `token` parameter may be ignored since each UTXO carries its own payment asset in its datum.
 
 **stdout:** Transaction hash.
 **Exit:** 0/1.
