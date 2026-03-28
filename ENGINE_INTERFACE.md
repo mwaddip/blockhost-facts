@@ -447,6 +447,10 @@ blockhost-generate-signup \
 
 The subscription contract manages plans, subscriptions, and payment methods. Any chain adapter must implement equivalent semantics.
 
+### Timing Rule
+
+**All on-chain timing must use block height, not timestamps.** Subscription expiry, fund cycles, any duration measured on-chain — express in blocks, not seconds. Block height is deterministic, monotonically increasing, and consistent across all chains. `block.timestamp` (or equivalent) is miner-adjustable, varies across chains, and drifts. The monitor and fund manager convert block heights to wall-clock estimates using the chain's known average block time when needed for display or provisioner calls — but the source of truth on-chain is always height.
+
 ### Abstract Functions
 
 #### Owner-only (contract deployer)
@@ -1068,6 +1072,14 @@ Same pattern as provisioner wizard plugin:
 | `encrypt_config(sig, plaintext)` | function | `(str, str) -> str` | Encrypt config for backup download; returns hex ciphertext string. Raise exception on failure |
 
 If absent, the installer accepts any non-empty signature and falls back to `bhcrypt` for encrypt/decrypt operations.
+
+### Optional Exports (Nginx)
+
+| Export | Type | Signature | Purpose |
+|--------|------|-----------|---------|
+| `get_nginx_extra_locations(session)` | function | `(dict) -> str` | Extra nginx location blocks injected into the HTTPS server config. Called during nginx finalization. Return empty string if not needed. |
+
+Used when the engine's signup page needs a server-side proxy to avoid CORS (e.g. Cardano engine proxies Koios API through nginx). The returned string is inserted verbatim inside the `server { }` block.
 
 ### Wallet Page POST Contract
 
