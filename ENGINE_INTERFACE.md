@@ -1081,6 +1081,68 @@ If absent, the installer accepts any non-empty signature and falls back to `bhcr
 
 Used when the engine's signup page needs a server-side proxy to avoid CORS (e.g. Cardano engine proxies Koios API through nginx). The returned string is inserted verbatim inside the `server { }` block.
 
+### Wallet Page: Deployer Top-Up
+
+The engine's blockchain wizard page (typically `blockchain.html`) **must** include a top-up UI that lets the operator fund the deployer wallet directly from their browser wallet. This is shown on the same page where the deployer wallet is generated or imported — before contract deployment.
+
+#### UI Requirements
+
+| Element | Description |
+|---------|-------------|
+| Amount input | Numeric input for native currency amount (ETH, sats, ADA, ERG, etc.) |
+| "Fund via wallet" button | Triggers browser wallet connection and transaction |
+| Status display | Shows transaction progress: connecting → confirm in wallet → tx sent → confirmed |
+| Balance display | Shows current deployer balance, updated after topup |
+
+Both the "generate new wallet" and "import existing wallet" flows must have their own topup section.
+
+#### Flow
+
+1. Operator enters amount and clicks the fund button
+2. Engine connects to the chain's browser wallet extension via its standard API:
+   - EVM: `window.ethereum` (MetaMask) — `eth_requestAccounts` → `eth_sendTransaction`
+   - OPNet: `window.opnet` (OPWallet) — `requestAccounts()` → `web3.sendBitcoin()`
+   - Cardano: `window.cardano[wallet].enable()` (CIP-30) — `getUtxos()` → build tx → `signTx()` → `submitTx()`
+   - Ergo: `window.ergo` (Nautilus) — EIP-12 connector
+3. User confirms in wallet popup
+4. Engine shows tx hash and polls for confirmation (receipt check, balance check, or both)
+5. On confirmation, balance display refreshes
+
+#### Confirmation Tracking
+
+The engine must confirm the transaction before allowing the operator to proceed. Acceptable methods:
+- Poll a tx-status backend endpoint (preferred)
+- Poll the balance endpoint and detect increase
+- Both (belt and suspenders — balance catch covers RPC edge cases)
+
+Polling interval should match the chain's block time expectations. Display elapsed time and/or block info during the wait.
+
+#### Balance Gating
+
+The "Continue" button on the blockchain page **must** be disabled until the deployer wallet has sufficient funds for the next step (contract deployment). The minimum amount is engine-defined — it depends on deployment cost (gas, reference scripts, collateral, etc.).
+
+#### Backend Endpoints (engine wizard plugin)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/blockchain/balance` | GET or POST | Query deployer balance via chain RPC/indexer. Returns balance in native units + `has_funds` boolean. |
+| `/api/blockchain/tx-status` | GET | (Optional) Check transaction confirmation status. Returns `confirmed`/`pending`/`unknown`. |
+| `/api/blockchain/block-info` | GET | (Optional) Current block height and age — useful for confirmation tracking UI. |
+| `/api/blockchain/tip` | GET | (Optional) Current chain tip / slot — needed for TTL calculation (Cardano, Ergo). |
+
+All endpoints that accept RPC URLs must validate them (http/https only, no private IPs — SSRF protection).
+
+#### Error Handling
+
+| Error | Display |
+|-------|---------|
+| No browser wallet detected | "No wallet detected — install [wallet name]" |
+| User rejected transaction (code 4001) | "Transaction rejected by user." |
+| Insufficient funds in wallet | Chain-specific error from wallet |
+| Network/RPC error | Generic error with message |
+
+After any error, the fund button must re-enable for retry.
+
 ### Wallet Page POST Contract
 
 Engine wallet templates MUST POST to the `wizard_wallet` endpoint with three form fields:
