@@ -41,10 +41,13 @@ NFT-gated wallet signature verification. Access is restricted to the current hol
 1. Browser loads `/login` → server generates challenge code
 2. User signs challenge with their wallet (MetaMask, signing page, or manual paste)
 3. `POST /api/auth/verify` with `{code, signature}`
-4. Backend recovers signer address from signature
-5. Backend calls `bw who admin` → queries `ownerOf(credential_nft_id)` on-chain
-6. If signer == NFT owner → session created, redirect to `/`
-7. If not → 401
+4. Backend validates signature format against engine `constraints.signature_pattern` (loaded from `/usr/share/blockhost/engine.json` at startup) — rejects malformed input before invoking the engine CLI
+5. Backend calls `bw who <code> <signature>` (signature recovery form) to recover the signer address — chain-agnostic, no `cast wallet verify` dependency
+6. Backend calls `bw who admin` → queries `ownerOf(credential_nft_id)` on-chain
+7. If recovered signer == NFT owner → session created, redirect to `/`
+8. If not → 401
+
+The constraint-based pre-validation comes from the engine manifest (`engine.json` → `constraints.signature_pattern`). When the manifest is absent the validation is skipped; in that case `bw who` itself rejects bad input.
 
 ### Session
 
@@ -137,7 +140,7 @@ VM commands resolved through provisioner manifest `commands.*` → CLI executabl
 
 | Method | Route | Request | Response |
 |--------|-------|---------|----------|
-| GET | `/api/wallet` | — | `[{role, address, can_sign}]` |
+| GET | `/api/wallet` | — | `[{role, address, can_sign}]` (bare array — no `{ok, ...}` envelope, deviates from sibling endpoints) |
 | GET | `/api/wallet/balance/<role>` | — | `{ok, output?, error?}` |
 | POST | `/api/wallet/send` | `{amount, token, from, to}` | `{ok, output?, error?}` |
 | POST | `/api/wallet/withdraw` | `{to, token?}` | `{ok, output?, error?}` |
@@ -166,6 +169,7 @@ Wallet/addressbook operations shell out to `bw` and `ab` CLIs with env from `/op
 | `/etc/blockhost/broker-allocation.json` | IPv6 broker status | Network API |
 | `/opt/blockhost/.env` | `RPC_URL`, `BLOCKHOST_CONTRACT` | Wallet CLI env |
 | `/usr/share/blockhost/provisioner.json` | Manifest (plugin discovery) | `app.py` (startup) |
+| `/usr/share/blockhost/engine.json` | `constraints` (address/signature/token patterns, native_token, labels) | `app.py` (startup), `auth.py` (signature validation), `system.py` (address/token validation) |
 
 ### Writes
 
@@ -206,8 +210,8 @@ All `blockhost-vm-*` commands resolved through provisioner manifest.
 
 | Action | Params | Purpose | Defined in |
 |--------|--------|---------|-----------|
-| `broker-renew` | (none) | Renew IPv6 broker lease | `blockhost-common` system.py |
-| `admin-path-update` | `{path_prefix: str}` | Update nginx location + schedule admin restart | `admin/root-agent-actions/admin_panel.py` |
+| `broker-renew` | (none) | Renew IPv6 broker lease | `blockhost-common` root-agent action plugin |
+| `admin-path-update` | `{path_prefix: str}` | Update nginx location + schedule admin restart | `admin/root-agent-actions/admin_panel.py` (admin module — see §10 packaging note) |
 
 ---
 

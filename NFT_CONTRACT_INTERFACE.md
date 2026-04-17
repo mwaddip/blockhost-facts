@@ -4,8 +4,14 @@
 > Each BlockHost engine deploys a chain-native version. Consumers (monitor, reconciler,
 > provisioner mint script, admin panel) program against this spec.
 >
-> **EVM:** Solidity, ERC-721 + ERC721Enumerable + Ownable (OpenZeppelin).
-> **OPNet:** OP_NET runtime, custom implementation (no inherited ERC721 base).
+> | Chain | Model | Implementation |
+> |-------|-------|----------------|
+> | EVM | Account-model contract | Solidity, ERC-721 + ERC721Enumerable + Ownable (OpenZeppelin) |
+> | OPNet | Account-model contract | OP_NET runtime, custom implementation (no inherited ERC721 base) |
+> | Cardano | UTXO + minting policy | Aiken validator (`validators/nft.ak`); per-token reference data lives in subscription datum, not the NFT itself |
+> | Ergo | UTXO + reference box | ErgoScript; per-token data lives in box register R8, updated by spending and recreating the box |
+>
+> Sections 2–8 below describe the EVM/OPNet account-model interface in detail. Section 9 covers the UTXO chains.
 
 ---
 
@@ -23,9 +29,9 @@ calls `mint()` with encrypted connection details.
 
 ---
 
-## 2. Core Functions (Both Chains)
+## 2. Core Functions (Account-Model Chains: EVM, OPNet)
 
-Functions that both implementations provide with equivalent semantics.
+Functions that both account-model implementations provide with equivalent semantics. UTXO chains satisfy the same external behavior through different mechanisms — see §9.
 
 ### Owner-Only (Write)
 
@@ -140,10 +146,12 @@ Single event covers all ownership changes. Mint: `from = address(0)`. Burn: `to 
 ### EVM
 
 ```
-mint(address,bytes)                                       → (recompute after contract rewrite)
-updateUserEncrypted(uint256,bytes)                        → 0x73f2ccc8
-getUserEncrypted(uint256)                                 → (recompute after contract rewrite)
+mint(address,bytes)                                       → 0xb510391f
+updateUserEncrypted(uint256,bytes)                        → 0x804a083e
+getUserEncrypted(uint256)                                 → 0x191803d1
 ```
+
+> Selectors are `keccak256(signature)[:4]`. Recompute with `cast sig "mint(address,bytes)"` if the contract's function signatures change.
 
 Standard ERC721/Enumerable/Ownable selectors omitted — use OpenZeppelin reference.
 
@@ -213,3 +221,42 @@ Deploys with token name and symbol. Owner = `msg.sender`.
 ### OPNet
 
 Constructor takes token name and symbol. Owner = deployer. No image URI support.
+
+---
+
+## 9. UTXO Chains: Cardano & Ergo
+
+The account-model contract interface (§2) does not translate directly to UTXO chains. Each NFT is a token issued by a minting policy; per-token data lives in script datums or box registers, not in mutable contract storage. The CLI surface (`bw who`, `is`, `blockhost-mint-nft`, `bw set encrypt`) presents the same behavior — the underlying mechanism differs.
+
+### Cardano (Aiken)
+
+| Element | Where it lives |
+|---------|----------------|
+| NFT minting policy | `validators/nft.ak` — handles `MintNft` and `BurnNft` redeemers only |
+| Token name | Per-mint identifier (typically VM token ID) |
+| Owner / `ownerOf` equivalent | The wallet currently holding the asset (queried via Koios `address_assets` / asset history) |
+| `userEncrypted` equivalent | Field on the **subscription validator datum** (`SubscriptionDatum.userEncrypted`), not on the NFT itself. Lives in `lib/blockhost/types.ak` |
+| `updateUserEncrypted` equivalent | None at the NFT layer. The subscription datum can be updated by spending and re-creating the subscription UTXO via the subscription validator's `Update` redeemer. The NFT metadata is fixed at mint time |
+
+The CIP-68 reference token / user token pattern would let metadata live alongside the NFT, but the current implementation does not use it — encrypted connection details ride on the subscription datum and the NFT is a bare credential token.
+
+**Consumers querying the chain:** Use Koios `asset_addresses(policy_id, asset_name)` to find current owner and `tx_metadata` plus subscription validator UTXO scans to find the encrypted blob.
+
+### Ergo (ErgoScript)
+
+| Element | Where it lives |
+|---------|----------------|
+| NFT issuance | UTXO with token quantity 1 and unique tokenId (= the box's first input id) |
+| Token reference | Stored in a **reference box** locked at the NFT contract, addressed by the NFT's tokenId |
+| Owner equivalent | Wallet holding the asset (queried via node `/blockchain/box/byTokenId` etc.) |
+| `userEncrypted` equivalent | Reference box register R8 |
+| `updateUserEncrypted` equivalent | Spend the reference box and recreate it with new R8 contents (no callable contract method) |
+
+Updates happen by transaction: spend the existing reference box, build a new box at the same script address with the same tokenId in `tokens[]` but new R8 bytes. The NFT contract enforces continuity rules.
+
+### Common Behavior Across UTXO Chains
+
+- `bw who <token_id>` resolves the current holder via the chain's indexer.
+- `blockhost-mint-nft --owner-wallet … --user-encrypted …` builds and submits a mint transaction; on Cardano this also creates a subscription UTXO carrying `userEncrypted`.
+- `bw set encrypt <token_id> <data>`: on Ergo, builds a reference-box update tx; on Cardano, builds a subscription-datum update tx (Update redeemer).
+- Reconciler logic still uses ownership checks, but reads from the indexer rather than `ownerOf()`.

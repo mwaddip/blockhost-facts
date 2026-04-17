@@ -480,6 +480,82 @@ Systemd template unit: `blockhost-opnet-adapter@.service` with `%i` for per-netw
 
 ---
 
+## 5b. Cardano Adapter
+
+**Blockchain**: Cardano (preprod or mainnet)
+**Architecture**: External adapter process → broker REST API
+**Source**: `adapters/cardano/adapter/`
+
+The Cardano adapter polls the Cardano broker registry validator via Koios (or Blockfrost), decrypts client request payloads from the request datum, calls `POST /v1/allocations` on the broker REST API, and writes the encrypted response into a response datum at the same validator address. Clients (`adapters/cardano/client/`) watch for the response UTXO and decrypt it locally.
+
+### Adapter Flow
+
+1. Poll Cardano indexer for new UTXOs at the broker registry validator address
+2. Parse request datums (CIP-68-style request token + encrypted payload)
+3. Decrypt payload with broker's ECIES private key
+4. `POST /v1/allocations` to the broker API (localhost:8080)
+5. Build a response transaction that locks the response datum (encrypted allocation reply) into the same validator
+6. Sign with the operator wallet and submit via Koios `tx_submit`
+
+### Persistent State
+
+Stored as `{"lastProcessedSlot": <int>}` (or comparable cursor) at `/var/lib/blockhost-broker/adapter-cardano-{network}.state` to avoid reprocessing.
+
+### Configuration (env vars)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `CARDANO_NETWORK` | yes | `preprod` or `mainnet` |
+| `CARDANO_REGISTRY_ADDRESS` | yes | Validator address holding the registry datum |
+| `CARDANO_OPERATOR_KEY_FILE` | yes | Path to operator signing key (CBOR-encoded skey) |
+| `BROKER_ECIES_PRIVATE_KEY` | yes | ECIES private key (hex) |
+| `KOIOS_URL` | no | Defaults to public Koios; override for self-hosted |
+| `BROKER_API_URL` | no | Defaults to `http://127.0.0.1:8080` |
+
+Systemd template: `blockhost-cardano-adapter@.service`.
+
+---
+
+## 5c. Ergo Adapter
+
+**Blockchain**: Ergo (testnet or mainnet)
+**Architecture**: External adapter process → broker REST API
+**Source**: `adapters/ergo/adapter/`
+
+The Ergo adapter polls the Ergo Explorer API for boxes locked at the guard script (parameterized by the registry NFT id), decrypts the request register contents, calls `POST /v1/allocations`, and writes the encrypted response into a fresh response box at the same guard script. Clients (`adapters/ergo/client/`) watch for the response box matching their request id and decrypt locally.
+
+### Adapter Flow
+
+1. Poll Ergo Explorer for unspent boxes at the guard script address
+2. Parse register layout (request id, encrypted payload, client serverPubkey)
+3. Decrypt payload with broker's ECIES private key
+4. `POST /v1/allocations` to broker API
+5. Build a response box at the guard script with the encrypted allocation reply in registers
+6. Sign via the local **ergo-relay** service (handles both signing and P2P broadcast — `127.0.0.1:9064`)
+
+### Guard Script Layout
+
+The guard script is a parameterized ErgoTree template (compiled from `adapters/ergo/contracts/guard.es`). It enforces continuity: any spend must produce a response box at the same script address with the matching registry NFT in `tokens[]`. Register surgery is performed as byte patches on the compiled ErgoTree to inject the registry NFT id at deploy time.
+
+### Persistent State
+
+`{"lastProcessedHeight": <int>}` at `/var/lib/blockhost-broker/adapter-ergo-{network}.state`.
+
+### Configuration (env vars)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ERGO_NETWORK` | yes | `testnet` or `mainnet` |
+| `ERGO_REGISTRY_NFT_ID` | yes | 64-hex token id parameterizing the guard script |
+| `ERGO_RELAY_URL` | no | Defaults to `http://127.0.0.1:9064` |
+| `ERGO_EXPLORER_URL` | yes | Explorer API base URL |
+| `BROKER_ECIES_PRIVATE_KEY` | yes | ECIES private key (hex) |
+| `BROKER_API_URL` | no | Defaults to `http://127.0.0.1:8080` |
+
+Systemd template: `blockhost-ergo-adapter@.service`.
+
+---
+
 ## 6. Configuration
 
 ### `/etc/blockhost-broker/config.toml`
@@ -548,33 +624,64 @@ All key files must be mode `0600`.
 CREATE TABLE allocations (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     prefix        TEXT NOT NULL UNIQUE,
-    prefix_index  INTEGER NOT NULL,
-    pubkey        TEXT NOT NULL UNIQUE,
+    prefix_index  INTEGER NOT NULL UNIQUE,
+    pubkey        TEXT NOT NULL,
     endpoint      TEXT,
     nft_contract  TEXT NOT NULL,
-    source        TEXT,
-    allocated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    last_seen_at  DATETIME,
-    is_test       BOOLEAN DEFAULT 0,
-    expires_at    DATETIME
+    allocated_at  TEXT NOT NULL,
+    last_seen_at  TEXT,
+    is_test       BOOLEAN NOT NULL DEFAULT 0,
+    expires_at    TEXT,
+    source        TEXT
+);
+CREATE INDEX idx_allocations_nft_contract ON allocations(nft_contract);
+CREATE INDEX idx_allocations_pubkey       ON allocations(pubkey);
+
+CREATE TABLE tokens (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash      TEXT UNIQUE NOT NULL,
+    name            TEXT,
+    max_allocations INTEGER DEFAULT 1,
+    is_admin        BOOLEAN DEFAULT FALSE,
+    created_at      TEXT NOT NULL,
+    expires_at      TEXT,
+    revoked         BOOLEAN DEFAULT FALSE
+);
+CREATE INDEX idx_tokens_hash ON tokens(token_hash);
+
+CREATE TABLE audit_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp     TEXT NOT NULL,
+    action        TEXT NOT NULL,
+    nft_contract  TEXT,
+    prefix        TEXT,
+    details       TEXT
 );
 
-CREATE TABLE metadata (
-    contract_address TEXT PRIMARY KEY,
-    last_processed_id INTEGER DEFAULT 0
+CREATE TABLE state (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
 );
 ```
 
 | Table | Purpose |
 |-------|---------|
 | `allocations` | Active IPv6 prefix allocations |
-| `metadata` | Per-contract last processed request ID (for polling) |
+| `tokens` | Optional out-of-band auth tokens (legacy / admin use; not used in V3 on-chain auth path) |
+| `audit_log` | Append-only log of allocation lifecycle actions |
+| `state` | Generic key/value persistence (currently holds `last_processed_id`) |
 
 ### Key Constraints
 
-- `prefix` is UNIQUE — one prefix per allocation
-- `pubkey` is UNIQUE — one WireGuard key per allocation
-- `nft_contract` is not unique in the schema but is treated as a logical key for re-requests (lookup by `nft_contract` returns existing allocation)
+- `prefix` and `prefix_index` are UNIQUE — one prefix per allocation
+- `pubkey` has a non-unique index — same WireGuard key may appear across re-requests
+- `nft_contract` has a non-unique index — re-requests look up by this column
+- `is_test`, `expires_at`, `source` are added via idempotent `ALTER TABLE` migrations on existing databases
+
+### Polling State
+
+Per-contract polling state lives in the `state` table under the key `last_processed_id`. There is no per-contract row — the EVM monitor uses a single `last_processed_id` value across the contracts it watches.
 
 ---
 
@@ -590,6 +697,12 @@ Written by the broker-client after a successful allocation. Read by blockhost-co
   "gateway": "2a11:6c7:f04:276::2",
   "broker_pubkey": "base64-wireguard-public-key",
   "broker_endpoint": "95.179.128.177:51820",
+  "nft_contract": "0x...",
+  "request_id": 42,
+  "wg_private_key": "base64-wg-private",
+  "wg_public_key": "base64-wg-public",
+  "allocated_at": "2026-04-17T12:34:56Z",
+  "broker_wallet": "0x...",
   "dns_zone": "blockhost.thawaras.org"
 }
 ```
@@ -599,12 +712,20 @@ Written by the broker-client after a successful allocation. Read by blockhost-co
 | `prefix` | string | yes | Allocated IPv6 CIDR |
 | `gateway` | string | yes | Broker gateway IPv6 |
 | `broker_pubkey` | string | yes | Broker WireGuard public key |
-| `broker_endpoint` | string | yes | Broker WireGuard endpoint |
+| `broker_endpoint` | string | yes | Broker WireGuard endpoint (`host:port`) |
+| `nft_contract` | string | client-written | The chain-specific contract/registry identifier the request was made against |
+| `request_id` | integer | client-written | The on-chain request ID returned by the chain registry |
+| `wg_private_key` | string | client-written | Local WireGuard private key for the tunnel (chmod 0640, root:blockhost) |
+| `wg_public_key` | string | client-written | Local WireGuard public key (mirror of derivation) |
+| `allocated_at` | string | client-written | ISO-8601 timestamp |
+| `broker_wallet` | string | client-written | Broker's on-chain wallet (used for renewal / release verification) |
 | `dns_zone` | string | no | Broker DNS zone (empty or absent = no DNS) |
 
-**Consumers**: `load_broker_allocation()` in blockhost-common, VM provisioners (IPv6 pool + FQDN derivation via `{offset:x}.{dns_zone}`).
+**Consumer contract:** `load_broker_allocation()` in blockhost-common reads only `prefix`, `gateway`, `broker_pubkey`, `broker_endpoint`, `dns_zone`. The remaining fields are client-side state needed for renewal, release, and reconnection — they're not part of the consumer interface but are present in the on-disk file. New consumers should treat the file as a superset and only depend on the documented five.
 
-The four required fields (`prefix`, `gateway`, `broker_pubkey`, `broker_endpoint`) match the `POST /v1/allocations` response schema. `dns_zone` is fetched separately via `GET /v1/config` through the tunnel.
+**Consumers**: `load_broker_allocation()` in blockhost-common, VM provisioners (IPv6 pool + FQDN derivation via `{offset:x}.{dns_zone}`), `broker-client` itself for renewal/release/reconnect.
+
+The first four fields match the `POST /v1/allocations` response schema. `dns_zone` is fetched separately via `GET /v1/config` through the tunnel.
 
 ---
 
@@ -733,8 +854,7 @@ WantedBy=multi-user.target
 
 `DESIGN.md` describes the original architecture and has diverged from the current implementation in several areas:
 - API paths show `/v1/allocate` (singular); actual is `/v1/allocations` (plural)
-- Token-based authentication described but removed in V3 (on-chain auth only)
-- Database schema shows `tokens` and `audit_log` tables; actual has `allocations` and `metadata` only
+- Token-based authentication described but removed in V3 (on-chain auth only); the `tokens` table still exists in the schema for legacy/admin use, but the V3 path bypasses it
 - `wg-quick save` described for persistence; actual uses dynamic `wg set` only
 - CLI tool `blockhost-broker-ctl` described but not implemented
 
@@ -764,37 +884,15 @@ The broker `.deb` provides a manifest and optional Python module for the install
     "wizard_module": "blockhost.broker.wizard_hook"
   },
   "chains": {
-    "evm": {
-      "wallet_pattern": "^0x[0-9a-fA-F]{40}$",
-      "contract_validation": "^0x[0-9a-fA-F]{40}$",
-      "fields": [
-        {
-          "name": "broker_registry",
-          "type": "text",
-          "label": "Registry Contract",
-          "placeholder": "0x...",
-          "hint": "The registry contract address on the blockchain network.",
-          "has_auto_fetch": true
-        }
-      ]
-    },
-    "opnet": {
-      "wallet_pattern": "^bc1p[a-z0-9]{58}$",
-      "contract_validation": "^0x[0-9a-fA-F]{64}$",
-      "fields": [
-        {
-          "name": "broker_registry",
-          "type": "text",
-          "label": "Registry Contract",
-          "placeholder": "0x...",
-          "hint": "The OPNet registry contract address (tweaked pubkey).",
-          "has_auto_fetch": true
-        }
-      ]
-    }
+    "evm":     { "wallet_pattern": "^0x[0-9a-fA-F]{40}$",      "contract_validation": "^0x[0-9a-fA-F]{40}$",      "fields": [...] },
+    "opnet":   { "wallet_pattern": "^(bc1p|opt1p)[a-z0-9]{58}$","contract_validation": "^0x[0-9a-fA-F]{64}$",      "fields": [...] },
+    "cardano": { "wallet_pattern": "^addr(_test)?1[a-z0-9]{50,120}$", "contract_validation": "^addr(_test)?1[a-z0-9]{50,120}$", "fields": [...] },
+    "ergo":    { "wallet_pattern": "^[1-9A-HJ-NP-Za-km-z]{40,60}$",   "contract_validation": "^[0-9a-fA-F]{64}$",         "fields": [...] }
   }
 }
 ```
+
+All four chains supported. Each `fields` array contains a single `broker_registry` field with chain-appropriate label, placeholder, and hint. See `blockhost-broker/scripts/wizard/broker.json` for the full manifest.
 
 ### Manifest fields
 

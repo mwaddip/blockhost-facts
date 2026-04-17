@@ -4,22 +4,35 @@ Style reference for provisioner wizard templates (and any template extending `ba
 
 ## Theme
 
-Dark theme. All colors via CSS custom properties:
+Dark theme. All colors via CSS custom properties. Several variables are computed at render time from engine/provisioner accent colors — see "Accent theming" below.
 
 | Variable | Value | Use |
 |----------|-------|-----|
-| `--primary` | `#2563eb` | Buttons, links, active states |
-| `--primary-dark` | `#1d4ed8` | Primary hover |
+| `--primary` | `{{ engine_color or '#2563eb' }}` | Buttons, links, active states (engine accent) |
+| `--primary-dark` | `color-mix(in srgb, var(--primary) 80%, black)` | Primary hover (computed) |
 | `--secondary` | `#64748b` | Secondary text |
 | `--success` | `#22c55e` | Success states, completed steps |
 | `--error` | `#ef4444` | Error states |
 | `--warning` | `#f59e0b` | Warning states |
-| `--bg` | `#0f172a` | Page background |
-| `--bg-card` | `#1e293b` | Card/header/footer background |
-| `--bg-input` | `#334155` | Input/select background, hover states |
+| `--bg` | `color-mix(in srgb, {{ provisioner_color or '#0f172a' }} 30%, #0f172a)` | Page background (provisioner-tinted) |
+| `--bg-card` | `color-mix(in srgb, {{ provisioner_color or '#1e293b' }} 30%, #1e293b)` | Card/header/footer background (provisioner-tinted) |
+| `--bg-input` | `color-mix(in srgb, {{ provisioner_color or '#334155' }} 30%, #334155)` | Input/select background, hover states (provisioner-tinted) |
 | `--text` | `#f1f5f9` | Primary text |
 | `--text-muted` | `#94a3b8` | Secondary text, labels, hints |
 | `--border` | `#475569` | All borders |
+
+### Accent theming
+
+The palette is parameterized by two values from manifests, both rendered into `base.html`:
+
+| Source | Manifest field | Affects |
+|--------|---------------|---------|
+| Engine | `engine.json` → `accent_color` | `--primary` (buttons, focus rings, badges, completed/active markers, links) |
+| Provisioner | `provisioner.json` → `accent_color` | `--bg`, `--bg-card`, `--bg-input` (background tint) blended at 30% with the dark default |
+
+Both fall back to dark blue defaults if the manifest doesn't declare an accent. `color-mix(in srgb, …, …)` keeps the tint subtle so the dark theme stays readable across all combinations.
+
+**Don't reference variables that are not in the table above.** Common bugs include `var(--danger)` (use `--error`), `var(--bg-secondary)` (use `--bg-input`), `var(--text-primary)` (use `--text`), `var(--border-color)` (use `--border`). Undefined vars render as the CSS fallback (often transparent), which silently breaks the design.
 
 ## Page Structure
 
@@ -310,6 +323,65 @@ For read-only key-value display (used on the summary page and provisioner summar
 </div>
 ```
 
+### Progress List (`.progress-list`)
+
+Vertical list of finalization steps with status icons. Used during the install/finalize page to show the running pipeline.
+
+```html
+<ul class="progress-list">
+    <li class="completed">
+        <span class="step-icon">&#10003;</span>
+        <div class="step-content">
+            <span class="step-name">Network configuration</span>
+            <span class="step-status">Done</span>
+        </div>
+    </li>
+    <li class="in-progress">
+        <span class="step-icon"><div class="spinner-small"></div></span>
+        <div class="step-content">
+            <span class="step-name">Contract deployment</span>
+            <span class="step-status">Submitting...</span>
+            <span class="step-hint">May take 30-60s on the chain</span>
+        </div>
+    </li>
+    <li class="failed">
+        <span class="step-icon">&#10005;</span>
+        <div class="step-content">
+            <span class="step-name">NFT mint</span>
+            <span class="step-status">Failed: insufficient gas</span>
+        </div>
+    </li>
+</ul>
+```
+
+States: `.completed` (green icon), `.in-progress` (primary color, paired with `.spinner-small`), `.failed` (error color), no class = pending muted.
+
+### Spinner Small (`.spinner-small`)
+
+16×16 spinner, smaller than the default `.spinner`. Used inside `.step-icon` and other tight slots.
+
+```html
+<div class="spinner-small"></div>
+```
+
+### Contract Address Row (`.contract-addr-*`)
+
+Inline display of a deployed contract or transaction hash with a copy button:
+
+```html
+<div class="contract-addr-row">
+    <span class="contract-addr-label">NFT contract</span>
+    <code class="contract-addr">0x1234...abcd</code>
+    <button type="button" class="btn-copy" onclick="copyToClipboard(this)">Copy</button>
+</div>
+```
+
+`.contract-addr` is the monospace value box. `.btn-copy` is a separate utility (smaller and more subtle than `.copy-btn` used inside `.address-box`). Add `.copied` to `.btn-copy` after a successful copy to flash visual confirmation.
+
+### Address Truncation Pattern
+
+Long addresses and transaction hashes should be truncated to `first-14...last-14` characters in display. The full value is preserved in `data-full`/`title` for tooltips and stays selectable via the copy button. Used heavily on the summary/finalize page where multiple long values stack vertically.
+
 ## Utility Classes
 
 | Class | CSS |
@@ -362,3 +434,12 @@ These elements are NOT part of the design system. Do not use them:
 | Bare `<h3>` outside `.form-section` | Wrap in `.form-section` for consistent borders/padding |
 | Inline `border`, `border-radius` on containers | Use `.card`, `.form-section`, `.alert` classes |
 | `<div class="form-row">` | `<div class="two-col">` or `<div class="form-inline">` |
+| `var(--danger)` | `var(--error)` |
+| `var(--bg-secondary)` | `var(--bg-input)` |
+| `var(--text-primary)` | `var(--text)` |
+| `var(--border-color)` | `var(--border)` |
+| Hardcoded color hex (`#dc3545`, `#1e293b`, etc.) | A palette variable from §Theme |
+
+### Inline `style=` attributes
+
+Templates frequently use small inline `style=` blocks for one-off layout tweaks (margins, gaps, widths). This is tolerated for non-color properties — adding a one-line CSS class for `style="margin-top: 1rem"` would be churn. **Inline color values are not tolerated**: any `style="color: ..."`, `style="background: ..."`, or `style="border: ..."` must use a palette variable, not a hex literal.

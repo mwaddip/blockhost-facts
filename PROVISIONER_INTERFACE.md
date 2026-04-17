@@ -527,7 +527,24 @@ ACTIONS = {
 }
 ```
 
-**Note:** The export is `ACTIONS`, not `COMMANDS` (despite what the contract doc says).
+### Action Sets per Provisioner
+
+Action names are provisioner-specific (each provisioner namespaces with its hypervisor verb). The currently shipped action sets are:
+
+| Action | Proxmox (`qm.py`) | libvirt (`virsh.py`) |
+|--------|:-----------------:|:--------------------:|
+| start | `qm-start` | `virsh-start` |
+| stop / shutdown | `qm-stop`, `qm-shutdown` | `virsh-shutdown` |
+| destroy / undefine | `qm-destroy` | `virsh-destroy`, `virsh-undefine` |
+| reboot | — | `virsh-reboot` |
+| create / define | `qm-create` | `virsh-define` |
+| import disk | `qm-importdisk` | — |
+| set config | `qm-set` | — |
+| template | `qm-template` | — |
+| update GECOS | `qm-update-gecos` | `virsh-update-gecos` |
+| bandwidth throttle | `pve-set-throttle`, `tc-rate-limit` | — (not yet ported) |
+
+The libvirt provisioner does not ship throttle/rate-limit actions yet — `vm-throttle.py` exists as a CLI but uses a different mechanism (cgroups via virsh schedinfo) that doesn't require a root agent action.
 
 ### Handler Signature
 
@@ -583,6 +600,10 @@ Installs the provisioner's platform dependencies during first system setup.
 | **Idempotent** | Must be safe to run multiple times. Use step markers in `$STATE_DIR`. |
 | **Exit** | 0 on success. Non-zero stops the entire first-boot sequence. |
 
+### Side Effects
+
+The Proxmox first-boot hook writes `/etc/blockhost/bridge-managed` (an empty marker file) to signal that the provisioner manages `vmbr0`. Other code (notably the bridge configuration step in main `first-boot.sh`) checks for this marker and skips conflicting setup when present. libvirt does not write a comparable marker — it manages its own networks via libvirt's network XML and does not touch `vmbr0`.
+
 ### Step Marker Pattern
 
 ```bash
@@ -593,7 +614,13 @@ if [ ! -f "$STEP_MARKER" ]; then
 fi
 ```
 
-**Critical:** Step marker names must not collide with markers used by the main `first-boot.sh`. The main script uses: `.step-network-wait`, `.step-packages`, `.step-foundry`. Provisioner hooks should use descriptive names like `.step-libvirt`, `.step-proxmox`.
+**Critical:** Step marker names must not collide with markers used by the main `first-boot.sh` or by the engine hook. Reserved markers (do not reuse):
+
+- Main script: `.step-network-wait`, `.step-network`, `.step-otp`, `.step-packages`, `.step-provisioner-hook`, `.step-bridge`, `.step-nodejs`, `.step-engine`, `.step-engine-hook`
+- Proxmox hook: `.step-hostname`, `.step-proxmox`, `.step-terraform`
+- libvirt hook: `.step-libvirt`, `.step-kvm-check`
+
+Provisioner hooks should use descriptive names that include the provisioner identifier (`.step-<provisioner>-<phase>`).
 
 ---
 
@@ -684,13 +711,13 @@ Documented for awareness. These exist in the current implementation.
 
 ~~The engine hardcodes `blockhost-mint-nft` instead of resolving through manifest.~~ Resolved: `mint_nft.py` moved from provisioner packages to the engine package. The CLI (`/usr/bin/blockhost-mint-nft`) and Python module (`blockhost.mint_nft`) are now shipped by the engine .deb. The manifest correctly has no `"mint-nft"` verb — minting is engine-owned.
 
-### ~~Hardcoded `/opt/` paths in app.py~~ (FIXED)
+### ~~Hardcoded `/opt/` paths in app.py~~ (RESOLVED)
 
-~~Lines 1648 and 3127 reference `/opt/blockhost-provisioner-proxmox/scripts/build-template.sh` as fallbacks.~~ Fixed: both now resolve `build-template` from the provisioner manifest. One remaining instance in `provisioner_proxmox/wizard.py:649` (submodule — prompt sent).
+All `build-template.sh` references in `app.py` and `provisioner_proxmox/wizard.py` resolve through the provisioner manifest (`commands.build-template`).
 
-### Transitional summary fallback
+### ~~Transitional summary fallback~~ (RESOLVED)
 
-`app.py` line 637 has a hardcoded Proxmox dict as fallback when no provisioner module is loaded. This should be removed — no-provisioner is not a valid state, and the hardcoded dict actively poisons custom provisioner development.
+The hardcoded Proxmox dict fallback in `app.py` for the no-provisioner-loaded case has been removed.
 
 ### ~~Stub commands in manifest~~ (RESOLVED)
 

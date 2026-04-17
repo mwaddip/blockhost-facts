@@ -90,10 +90,9 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
-| `reserve_nft_token_id` | `(vm_name, token_id=None)` | `int` | Auto-allocates if token_id is None. Raises `ValueError` if token_id already reserved (status != "failed"). |
-| `mark_nft_minted` | `(token_id, owner_wallet)` | `None` | Records successful mint |
-| `mark_nft_failed` | `(token_id)` | `None` | Marks reservation as failed |
-| `get_nft_token` | `(token_id)` | `Optional[dict]` | Lookup by token ID |
+| `set_nft_minted` | `(vm_name, token_id)` | `None` | Records the minted NFT on the VM record. Sets `nft_token_id`, `nft_minted = True`, `nft_minted_at`. Raises `ValueError` if VM not found. |
+
+There is no separate reservation lifecycle. The engine handler mints the NFT (the chain assigns the token ID), reads the actual token ID from `blockhost-mint-nft` stdout, then calls `set_nft_minted()` to record it. If anything fails between mint and recording, the reconciler picks it up by querying `ownerOf(tokenId)` on-chain and matching back to the VM. Local pre-mint reservation is intentionally absent.
 
 ### VM Record Schema
 
@@ -111,25 +110,14 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
     "expires_at": str,       # ISO 8601
     "suspended_at": Optional[str],   # Added on suspend
     "destroyed_at": Optional[str],   # Added on destroy
+    "nft_token_id": Optional[int],     # Added by set_nft_minted()
+    "nft_minted": Optional[bool],      # Added by set_nft_minted()
+    "nft_minted_at": Optional[str],    # Added by set_nft_minted() — ISO 8601
+    "gecos_synced": Optional[bool],    # Set by reconciler when GECOS update succeeds
 }
 ```
 
-### NFT Token Schema
-
-NFT tokens are tracked in a separate top-level `reserved_nft_tokens` map in the database (not inside VM records). Keyed by token ID (string).
-
-```python
-"reserved_nft_tokens": {
-    "<token_id>": {
-        "vm_name": str,
-        "status": "reserved" | "minted" | "failed",
-        "reserved_at": str,          # ISO 8601
-        "owner_wallet": Optional[str],  # Set on mint
-        "minted_at": Optional[str],     # Set on mint
-        "failed_at": Optional[str],     # Set on failure
-    }
-}
-```
+NFT state is stored inline on the VM record. There is no top-level `reserved_nft_tokens` map.
 
 ### Locking Model
 
@@ -144,7 +132,7 @@ Production (`VMDatabase`) uses a separate lockfile at `{db_file}.lock` to avoid 
 
 `_atomic_update` is abstract on `VMDatabaseBase`. `VMDatabase` implements it with `fcntl.LOCK_EX` on the lockfile. `MockVMDatabase` implements it as a passthrough (read → mutate → write, no locking).
 
-All 13 mutating methods in the base class use `_atomic_update`: `register_vm`, `mark_suspended`, `mark_active`, `mark_destroyed`, `allocate_ip`, `allocate_ipv6`, `allocate_vmid`, `extend_expiry`, `reserve_nft_token_id`, `mark_nft_minted`, `mark_nft_failed`. Plus `release_ip` and `release_ipv6` on `VMDatabase`.
+All mutating methods in the base class use `_atomic_update`: `register_vm`, `mark_suspended`, `mark_active`, `mark_destroyed`, `allocate_ip`, `allocate_ipv6`, `allocate_vmid`, `extend_expiry`, `set_nft_minted`. Plus `release_ip` and `release_ipv6` on `VMDatabase`.
 
 ### Storage
 
@@ -177,18 +165,16 @@ This is the real interface. Everything else is a wrapper around this.
 
 | Function | Calls Action | Params |
 |----------|-------------|--------|
-| `ip6_route_add(address, dev="vmbr0")` | `ip6-route-add` | `{address, dev}` | Always pass `dev` explicitly |
-| `ip6_route_del(address, dev="vmbr0")` | `ip6-route-del` | `{address, dev}` | Always pass `dev` explicitly |
+| `ip6_route_add(address, dev)` | `ip6-route-add` | `{address, dev}` |
+| `ip6_route_del(address, dev)` | `ip6-route-del` | `{address, dev}` |
 | `addressbook_save(entries)` | `addressbook-save` | `{entries}` |
+
+`dev` is required — there is no default. (Earlier versions defaulted to `"vmbr0"`; that Proxmox-ism was removed.)
 
 ### Exceptions
 
 - `RootAgentError` — base exception, agent returned `{"ok": false}`
 - `RootAgentConnectionError(RootAgentError)` — socket unreachable
-
-### Note on Convenience Wrappers
-
-`ip6_route_add()` and `ip6_route_del()` default to `dev="vmbr0"`. Callers should always pass `dev` explicitly — the default is a Proxmox-ism. The libvirt provisioner uses `call()` directly, which avoids this.
 
 ---
 
@@ -233,18 +219,23 @@ VMID_MAX = 999999
 
 **Validation Regexes:**
 ```python
-NAME_RE          = re.compile(r'^[a-z0-9-]{1,64}$')
-SHORT_NAME_RE    = re.compile(r'^[a-z0-9-]{1,32}$')
-STORAGE_RE       = re.compile(r'^[a-z0-9-]+$')
-ADDRESS_RE       = re.compile(r'^0x[0-9a-fA-F]{40}$')
-COMMENT_RE       = re.compile(r'^[a-zA-Z0-9-]+$')
-IPV6_CIDR128_RE  = re.compile(r'^([0-9a-fA-F:]+)/128$')
+NAME_RE             = re.compile(r'^[a-z0-9-]{1,64}$')
+SHORT_NAME_RE       = re.compile(r'^[a-z0-9-]{1,32}$')
+STORAGE_RE          = re.compile(r'^[a-z0-9-]+$')
+_HEX_ADDRESS_RE     = re.compile(r'^0x[0-9a-fA-F]{40,128}$')   # internal — use is_valid_address()
+_BECH32_ADDRESS_RE  = re.compile(r'^[a-z][a-z0-9_]{0,9}1[02-9ac-hj-np-z]{39,98}$')   # internal
+COMMENT_RE          = re.compile(r'^[a-zA-Z0-9-]+$')
+IPV6_CIDR128_RE     = re.compile(r'^([0-9a-fA-F:]+)/128$')
+TAP_DEV_RE          = re.compile(r'^tap\d+i\d+$')
 ```
 
+The two address regexes are internal (leading underscore). Plugins should call `is_valid_address(addr)` instead — it handles both hex (EVM/OPNet, with the wider 40–128 char range to cover non-EVM hex addresses) and Bech32 (Cardano `addr1...`/`addr_test1...`, Ergo testnet, etc.).
+
 **Validation Functions:**
+- `is_valid_address(addr: str) -> bool` — chain-agnostic structural check (hex OR Bech32). Use this from plugins; do not import `_HEX_ADDRESS_RE` / `_BECH32_ADDRESS_RE` directly.
 - `validate_vmid(vmid: int) -> int`
 - `validate_ipv6_128(address: str) -> str`
-- `validate_dev(dev: str) -> str`
+- `validate_dev(dev: str) -> str` — accepts entries from `ALLOWED_ROUTE_DEVS` **or** any device matching `TAP_DEV_RE` (libvirt's per-VM tap interfaces, e.g. `tap0i0`, `tap1i2`)
 
 **Execution:**
 - `run(cmd: list, timeout: int = 120) -> tuple[int, str, str]` — returns `(returncode, stdout, stderr)`
@@ -466,9 +457,8 @@ contract_address: "0x..."
 | 5 | ~~`LEGACY_COMMANDS` fallback~~ | ~~`provisioner.py`~~ | ~~Hardcoded Proxmox commands when no manifest~~ | RESOLVED: removed from codebase |
 | 6 | ~~`ALLOWED_ROUTE_DEVS = {'vmbr0'}`~~ | ~~`_common.py`~~ | ~~vmbr0 is Proxmox-specific bridge name~~ | RESOLVED: expanded to include virbr0, br0, br-ext, docker0 |
 | 7 | ~~`QM_SET_ALLOWED_KEYS`, `QM_CREATE_ALLOWED_ARGS`~~ | ~~`_common.py`~~ | ~~Proxmox constants in shared code~~ | RESOLVED: removed from codebase (live in provisioner-proxmox's qm.py) |
-| 8 | `vmid_range`/`allocate_vmid()` | `vm_db.py` | VMID is Proxmox-specific (libvirt uses domain names) | OPEN: present but dormant. libvirt never calls it. Architectural debt only. |
-
-**Remaining convenience wrapper debt:** `ip6_route_add/del()` default `dev="vmbr0"`. Not blocking — libvirt uses `call()` directly. Should be changed to require explicit `dev` parameter (no default).
+| 8 | `vmid_range`/`allocate_vmid()` | `vm_db.py` | VMID is Proxmox-specific (libvirt uses domain names) | RESOLVED in API surface: present and functional, dormant for libvirt (raises `RuntimeError` if `vmid_range` not configured, so libvirt never trips it). Acceptable as long as it remains optional to call. |
+| 9 | ~~`ip6_route_add/del()` default `dev="vmbr0"`~~ | ~~`root_agent.py`~~ | ~~Proxmox-ism in shared wrapper~~ | RESOLVED: defaults removed; `dev` is now a required argument. |
 
 ---
 
