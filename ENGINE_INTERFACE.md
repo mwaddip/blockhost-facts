@@ -786,7 +786,7 @@ admin:
 
 | File | What | Read by |
 |------|------|---------|
-| `/opt/blockhost/.env` (EVM, OPNet) or `/etc/blockhost/blockhost-env` (Cardano, Ergo) | `RPC_URL`, `BLOCKHOST_CONTRACT` | Monitor, bw, ab (env vars) |
+| `/opt/blockhost/.env` | `RPC_URL`, `BLOCKHOST_CONTRACT`, plus engine-specific vars | Monitor, bw, ab (env vars) |
 | `/etc/blockhost/blockhost.yaml` | Server keys, contract address, admin config, fund_manager config | Monitor, bw who, init, generate-signup, reconcile |
 | `/etc/blockhost/web3-defaults.yaml` | Chain ID, NFT contract, RPC URL, deployer key path | mint_nft, bw who, reconcile, generate-signup |
 | `/etc/blockhost/addressbook.json` | Role-to-wallet mapping | bw, ab, fund-manager, monitor |
@@ -933,7 +933,7 @@ WantedBy=multi-user.target
 
 The `ExecStartPre=+` line runs as root (the `+` prefix bypasses `User=`) to ensure `/run/blockhost` exists with the correct ownership/perms before the monitor drops to the `blockhost` user.
 
-**Per-engine variation:** EVM and OPNet match the unit shown above. Cardano and Ergo currently ship a leaner unit without `ExecStartPre`, without `Environment=NODE_OPTIONS=...`, and with `EnvironmentFile=-/etc/blockhost/blockhost-env` (optional, different path) instead of the EVM/OPNet `/opt/blockhost/.env`. This divergence reflects historical engine origins and should be reconciled.
+All four engines ship this canonical unit.
 
 ### Package: `blockhost-engine-evm`
 
