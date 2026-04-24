@@ -1318,3 +1318,45 @@ Replaced by `bw who <message> <signature>` for signature recovery + engine `cons
 ### ~~Admin panel hardcoded EVM format assumptions~~ (RESOLVED)
 
 All format validation in the admin panel (`auth.py`, `system.py`) now comes from engine manifest `constraints`. No hardcoded `0x` prefix checks, `len == 42`, or `len == 132` remain. If `constraints` is absent from the manifest, format validation is skipped and CLIs handle rejection.
+
+---
+
+## 13. Network Hook Integration
+
+The engine handler (fund manager / subscription handler) calls the network hook after VM creation to resolve the subscriber-facing connection endpoint. The engine itself is network-mode-agnostic — it calls `get_connection_endpoint()` and receives an opaque host string.
+
+### VM Creation Flow
+
+```
+1. If broker mode: broker-client allocation (existing)
+2. provisioner.create(name, wallet, ...) → {ip, ipv6, vmid, username}
+3. host = get_connection_endpoint(vm_name, result.ip, network_mode)
+     → broker:  result.ipv6
+     → manual:  static_ip from config
+     → onion:   creates hidden service, pushes .onion to VM, returns .onion
+4. Mint NFT (existing)
+5. provisioner.guest-exec(name, "sed GECOS with NFT ID")
+6. encrypt_connection_details({host, port: 22}) → subscriber
+```
+
+### VM Destroy Flow
+
+```
+1. provisioner.destroy(name)
+2. network_hook.cleanup(name, network_mode)
+3. Broker release if applicable
+```
+
+### Network Mode
+
+The engine reads the current network mode from `/etc/blockhost/network-mode` (single line: `broker`, `manual`, or `onion`). Written by wizard finalization. If the file is absent, default to `broker` for backwards compatibility.
+
+### Guest-Exec
+
+The `update-gecos` provisioner command is superseded by the generic `guest-exec`:
+
+```
+blockhost-vm-guest-exec <name> "sed GECOS command..."
+```
+
+See `PROVISIONER_INTERFACE.md` §2 (`guest-exec`) for the full command spec.

@@ -35,7 +35,8 @@ The manifest is the single discovery mechanism. Every consumer finds the provisi
     "build-template": "<executable-name>",
     "gc":             "<executable-name>",
     "resume":         "<executable-name>",
-    "update-gecos":   "<executable-name>"
+    "update-gecos":   "<executable-name>",
+    "guest-exec":     "<executable-name>"
   },
 
   "setup": {
@@ -404,6 +405,33 @@ Updates the GECOS field of the VM's primary user to reflect a new wallet address
 **Consumers:** Engine reconciler (ownership transfer detection).
 
 **Note:** The VM must be running with a responsive QEMU guest agent. If the VM is stopped or suspended, the command fails and the reconciler retries on the next cycle.
+
+---
+
+### `guest-exec`
+
+```
+blockhost-vm-guest-exec <name> <command...>
+```
+
+Executes a shell command inside a running VM. General-purpose primitive used by the
+network hook (for pushing `.onion` addresses, updating `/etc/hosts`, updating signing URLs)
+and by `update-gecos` (which delegates to this command).
+
+| Arg | Required | Description |
+|-----|----------|-------------|
+| `name` | yes | VM name (positional) |
+| `command...` | yes | Shell command to execute inside the VM (positional, all remaining args) |
+
+**Implementation per provisioner:**
+- **libvirt:** `virsh qemu-agent-command <domain> '{"execute":"guest-exec","arguments":{"path":"/bin/sh","arg":["-c","<command>"]}}'` + poll `guest-exec-status` for exit code and output
+- **Proxmox:** `qm guest exec <vmid> -- <command...>`
+
+**Exit:** Exit code of the command run inside the VM. 0 = success. Non-zero = command failed.
+
+**Consumers:** Network hook (onion routing setup/teardown), engine handler (GECOS updates), admin panel (future).
+
+**Note:** The VM must be running with a responsive guest agent. If the guest agent is unresponsive, the command fails and callers retry.
 
 ---
 

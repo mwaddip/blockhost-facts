@@ -408,6 +408,47 @@ contract_address: "0x..."
 **Owned by**: installer / init scripts
 **Read by**: `load_blockhost_config()`, validate_system.py
 
+### `/etc/blockhost/network-mode`
+
+```
+broker
+```
+
+Single line containing the network mode: `broker`, `manual`, or `onion`. Written by wizard finalization. Read by first-boot (skips broker-client install in onion mode), engine handler (passes to network hook), and the network hook itself.
+
+**Owned by**: wizard finalization
+**Read by**: first-boot, engine handler, network hook
+
+### Network Hook
+
+Module: `blockhost.network_hook`
+
+Provides network-mode-agnostic connection endpoint resolution. The engine handler calls this after `provisioner.create()` to get the endpoint subscribers use to connect.
+
+```python
+get_connection_endpoint(vm_name: str, bridge_ip: str, mode: str) -> str
+```
+
+| Mode | Behavior | Returns |
+|------|----------|---------|
+| `broker` | Pass-through (IPv6 from broker-allocation.json) | IPv6 address string |
+| `manual` | Pass-through (static IP) | Static IP string |
+| `onion` | Calls root agent `tor-hidden-service-add`, pushes `.onion` into VM via `guest-exec`, updates signing URL | `.onion` address |
+
+```python
+cleanup(vm_name: str, mode: str) -> None
+```
+
+Removes network resources on VM destroy. Onion mode calls root agent `tor-hidden-service-remove`.
+
+### Root Agent — Tor Actions
+
+The root agent (`root_agent_actions/system.py`) provides two actions for hidden service lifecycle:
+
+**`tor-hidden-service-add`:** Params: `vm_name`, `bridge_ip`, `port=22`. Creates `/var/lib/tor/blockhost-{name}/`, appends `HiddenServiceDir` and `HiddenServicePort` to `/etc/tor/torrc`, reloads tor, reads the generated `.onion` from the `hostname` file, returns it.
+
+**`tor-hidden-service-remove`:** Params: `vm_name`. Removes matching lines from `/etc/tor/torrc`, reloads tor, deletes `/var/lib/tor/blockhost-{name}/`.
+
 ---
 
 ## 8. Installed File Locations
