@@ -89,13 +89,20 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 | `get_vms_to_destroy` | `(grace_days)` | `list[dict]` | Suspended VMs past grace period |
 | `get_expired_vms` | `(grace_days=0)` | `list[dict]` | All VMs past expiry + grace |
 
-#### NFT Token Management
+#### Chain State Recording
+
+Mutators that record on-chain provisioning state onto the local VM record. Routed through `_atomic_update` so they serialise with all other mutators on the same lockfile.
 
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
 | `set_nft_minted` | `(vm_name, token_id)` | `None` | Records the minted NFT on the VM record. Sets `nft_token_id`, `nft_minted = True`, `nft_minted_at`. Raises `ValueError` if VM not found. |
+| `update_beacon_info` | `(vm_name, beacon_name, utxo_ref)` | `bool` | Sets `beacon_name` and `utxo_ref` on an existing VM record. Returns `False` if `vm_name` not found (no-op, no exception); `True` on success. |
 
-There is no separate reservation lifecycle. The engine handler mints the NFT (the chain assigns the token ID), reads the actual token ID from `blockhost-mint-nft` stdout, then calls `set_nft_minted()` to record it. If anything fails between mint and recording, the reconciler picks it up by querying `ownerOf(tokenId)` on-chain and matching back to the VM. Local pre-mint reservation is intentionally absent.
+**Note on `update_beacon_info` return convention.** Every other mutator on `VMDatabaseBase` raises `ValueError` when the target VM is missing. `update_beacon_info` is the deliberate exception: callers invoke it after a chain commit, and a concurrent VM deletion shouldn't blow up the post-commit handler with an exception that's not actionable. Returning `False` lets the caller race a deletion safely. Future `update_*_info`-style mutators that face the same race should follow this convention.
+
+**Note on field naming.** `beacon_name` and `utxo_ref` are Cardano-specific terminology — beacons are Cardano's chain-side provisioning markers, UTxO refs are Cardano transaction outputs. The method and fields are nominally chain-specific; other chains writing analogous state may grow their own fields in the same `vms[vm_name]` dict (no schema migration), or this method may evolve into a generic `update_chain_state(vm_name, **fields)` form if multiple chains start needing similar writes. For now, the Cardano-specific shape is acknowledged.
+
+There is no separate NFT reservation lifecycle. The engine handler mints the NFT (the chain assigns the token ID), reads the actual token ID from `blockhost-mint-nft` stdout, then calls `set_nft_minted()` to record it. If anything fails between mint and recording, the reconciler picks it up by querying `ownerOf(tokenId)` on-chain and matching back to the VM. Local pre-mint reservation is intentionally absent.
 
 ### VM Record Schema
 
@@ -117,6 +124,8 @@ There is no separate reservation lifecycle. The engine handler mints the NFT (th
     "nft_token_id": Optional[int],     # Added by set_nft_minted()
     "nft_minted": Optional[bool],      # Added by set_nft_minted()
     "nft_minted_at": Optional[str],    # Added by set_nft_minted() — ISO 8601
+    "beacon_name": Optional[str],      # Added by update_beacon_info() — chain-defined; today: Cardano provisioning beacon
+    "utxo_ref": Optional[str],         # Added by update_beacon_info() — chain-defined; today: Cardano UTxO reference
     "gecos_synced": Optional[bool],    # Set by reconciler when GECOS update succeeds
 }
 ```
@@ -136,7 +145,7 @@ Production (`VMDatabase`) uses a separate lockfile at `{db_file}.lock` to avoid 
 
 `_atomic_update` is abstract on `VMDatabaseBase`. `VMDatabase` implements it with `fcntl.LOCK_EX` on the lockfile. `MockVMDatabase` implements it as a passthrough (read → mutate → write, no locking).
 
-All mutating methods in the base class use `_atomic_update`: `register_vm`, `mark_suspended`, `mark_active`, `mark_destroyed`, `allocate_ip`, `allocate_ipv6`, `allocate_vmid`, `extend_expiry`, `set_nft_minted`, `delete_vm`. Plus `release_ip` and `release_ipv6` on `VMDatabase`.
+All mutating methods in the base class use `_atomic_update`: `register_vm`, `mark_suspended`, `mark_active`, `mark_destroyed`, `allocate_ip`, `allocate_ipv6`, `allocate_vmid`, `extend_expiry`, `set_nft_minted`, `update_beacon_info`, `delete_vm`. Plus `release_ip` and `release_ipv6` on `VMDatabase`.
 
 ### Storage
 
