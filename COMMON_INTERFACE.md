@@ -60,13 +60,14 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
-| `register_vm` | `(name, vmid, ip, ipv6=None, owner="", expiry_days=30, purpose="", wallet_address=None)` | `dict` (VM record) | Creates new record |
+| `register_vm` | `(name, vmid, ip, ipv6=None, owner="", expiry_days=30, purpose="", wallet_address=None, username=None)` | `dict` (VM record) | Creates new record. Rejects duplicate `name` regardless of status — call `delete_vm` first to clobber a destroyed record. |
 | `get_vm` | `(name)` | `Optional[dict]` | Lookup by name |
 | `list_vms` | `(status=None)` | `list[dict]` | Filter: `"active"`, `"suspended"`, `"destroyed"`, or `None` for all |
 | `extend_expiry` | `(name, days)` | `None` | Extends from current expiry |
 | `mark_suspended` | `(name)` | `None` | Sets status + suspended_at |
 | `mark_active` | `(name, new_expiry=None)` | `None` | Reactivates, optionally sets new expiry |
 | `mark_destroyed` | `(name)` | `None` | Sets status + destroyed_at, releases IPs |
+| `delete_vm` | `(name)` | `None` | Permanently removes the record. Releases IPv4/IPv6 allocations. Raises `ValueError` if not found. Used for destroyed-name reuse — provisioners call this before re-registering a name that previously belonged to a destroyed VM. |
 
 #### Allocation
 
@@ -77,6 +78,8 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 | `allocate_vmid` | `()` | `int` | Next available VMID. Raises `RuntimeError` if `vmid_range` not configured |
 | `release_ip` | `(ip)` | `None` | VMDatabase only (not on mock) |
 | `release_ipv6` | `(ipv6)` | `None` | VMDatabase only (not on mock) |
+
+**VMID semantics for non-numeric provisioners:** Provisioners without a numeric VMID (libvirt) call `register_vm` with `vmid=0`. The natural key for those VMs is `vm_name`. Code reading `vm['vmid']` from the DB should fall through to `vm['vm_name']` when it sees `0`.
 
 #### Garbage Collection
 
@@ -105,6 +108,7 @@ There is no separate reservation lifecycle. The engine handler mints the NFT (th
     "status": "active" | "suspended" | "destroyed",
     "owner": str,
     "wallet_address": Optional[str],
+    "username": Optional[str],       # Linux username provisioned on the VM (set by register_vm)
     "purpose": str,
     "created_at": str,       # ISO 8601
     "expires_at": str,       # ISO 8601
@@ -132,7 +136,7 @@ Production (`VMDatabase`) uses a separate lockfile at `{db_file}.lock` to avoid 
 
 `_atomic_update` is abstract on `VMDatabaseBase`. `VMDatabase` implements it with `fcntl.LOCK_EX` on the lockfile. `MockVMDatabase` implements it as a passthrough (read → mutate → write, no locking).
 
-All mutating methods in the base class use `_atomic_update`: `register_vm`, `mark_suspended`, `mark_active`, `mark_destroyed`, `allocate_ip`, `allocate_ipv6`, `allocate_vmid`, `extend_expiry`, `set_nft_minted`. Plus `release_ip` and `release_ipv6` on `VMDatabase`.
+All mutating methods in the base class use `_atomic_update`: `register_vm`, `mark_suspended`, `mark_active`, `mark_destroyed`, `allocate_ip`, `allocate_ipv6`, `allocate_vmid`, `extend_expiry`, `set_nft_minted`, `delete_vm`. Plus `release_ip` and `release_ipv6` on `VMDatabase`.
 
 ### Storage
 
@@ -273,6 +277,41 @@ Module: `blockhost.cloud_init`
 
 ---
 
+## 5a. Naming Validators
+
+Module: `blockhost.naming`
+
+Shared validators for identifiers used as natural keys across BlockHost. Centralised so that tightening the rules (e.g. removing dots) only touches one site, instead of the 9+ places where the same regex used to be duplicated across libvirt and Proxmox provisioners.
+
+### Constants
+
+| Name | Value | Purpose |
+|------|-------|---------|
+| `DOMAIN_NAME_RE` | `re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$')` | VM domain name. Used as the natural key in `vms.json` and as the libvirt domain name. |
+
+### Functions
+
+| Function | Signature | Returns | Raises |
+|----------|-----------|---------|--------|
+| `is_valid_domain_name` | `(name: str) -> bool` | `True` if `name` matches `DOMAIN_NAME_RE`, else `False`. Returns `False` for non-string input or empty string. | — |
+| `validate_domain_name` | `(name: str) -> str` | `name` if valid; intended for use at trust boundaries (root agent action handlers, CLI entry points). | `ValueError(f'Invalid domain name: {name!r}')` if invalid. |
+
+### Why this regex?
+
+- **Leading char must be alphanumeric** — bans hostnames starting with `.` or `-` (which break libvirt domain naming and DNS).
+- **Allows `.`, `_`, `-`** in the body — matches both libvirt domain conventions and the historical Proxmox hostname rules.
+- **64-char ceiling** — Linux `HOST_NAME_MAX` is 64; libvirt domain names are bounded by the same practical limit.
+
+### Re-exports
+
+Available from the package root: `from blockhost import DOMAIN_NAME_RE, is_valid_domain_name, validate_domain_name`.
+
+### Cross-language
+
+Bash CLI wrappers (5 libvirt scripts + Proxmox equivalents) keep an inline regex check matching `DOMAIN_NAME_RE`. Cross-language sharing via a CLI helper was considered and rejected as overkill — bash callers are simple `[[ "$name" =~ ^... ]]` checks at script entry, and the duplication risk is bounded (one regex, two implementations of the same string).
+
+---
+
 ## 6. Provisioner Dispatcher
 
 Module: `blockhost.provisioner`
@@ -313,6 +352,43 @@ get_provisioner() -> ProvisionerDispatcher  # singleton
 
 ---
 
+## 6a. CLI tools
+
+Engine-helper binaries shipped under `/usr/bin/`. Engines call these instead of `python3 -c "<inline>"` to avoid per-call interpreter startup + import cost (~50–150 ms per spawn, 2–4× per subscription event in the worst case).
+
+### Conventions
+
+- `0` = success
+- `1` = expected failure (record not found, validation error)
+- `2` = unexpected exception
+- stderr = human-readable error message
+- stdout = structured payload (JSON, host string, etc.)
+
+### `blockhost-vmdb`
+
+Wraps `VMDatabaseBase` methods that engines need at provisioning time.
+
+| Subcommand | Args | Stdout | Exit | Wraps |
+|------------|------|--------|------|-------|
+| `get-vm` | `<vm_name>` | JSON-encoded VM record | 0 ok / 1 not found | `VMDatabaseBase.get_vm` |
+| `mark-nft-minted` | `<vm_name> <token_id>` | (empty) | 0 ok / 1 not found | `VMDatabaseBase.set_nft_minted` |
+| `extend-expiry` | `<vm_name> <days>` | line 1: confirmation; line 2: `NEEDS_RESUME` (only if VM was suspended at extend time) | 0 ok / 1 not found | `VMDatabaseBase.extend_expiry` (with status check around it) |
+
+**Note on `mark-nft-minted` signature.** Some earlier engine prompts suggested `mark-nft-minted <token_id> <owner_wallet>`. That doesn't match the underlying API (`set_nft_minted(vm_name, token_id)`), and the engine handler already knows `vm_name` at mint time (it just provisioned the VM). The CLI mirrors the Python signature to avoid a parallel wallet→VM lookup.
+
+### `blockhost-network-hook`
+
+Wraps `blockhost.network_hook` for engines that need to compute connection endpoints without spawning Python per call.
+
+| Subcommand | Args | Stdout | Exit | Wraps |
+|------------|------|--------|------|-------|
+| `resolve` | `<vm_name> <bridge_ip> <mode>` | subscriber-facing host (single line) | 0 ok / 1 error | `network_hook.get_connection_endpoint` |
+| `cleanup` | `<vm_name> <mode>` | (empty) | 0 ok / 1 error | `network_hook.cleanup` |
+
+`mode` is `broker` / `manual` / `onion` per §7's network-mode docs.
+
+---
+
 ## 7. Config File Schemas
 
 ### `/etc/blockhost/db.yaml`
@@ -339,20 +415,13 @@ ipv6_pool:
 
 # Optional — set by provisioner if needed
 # terraform_dir: /var/lib/blockhost/terraform
-
-fields:                   # Optional — field name mapping
-  vm_name: vm_name
-  vmid: vmid
-  ip_address: ip_address
-  expires_at: expires_at
-  owner: owner
-  status: status
-  created_at: created_at
 ```
 
 **Owned by**: common (ships template in .deb)
 **Written by**: wizard finalization (fills in actual IP pool, expiry values)
 **Read by**: every provisioner script, VM database, GC
+
+**Note on `fields:` removal:** earlier versions of common shipped an optional `fields:` block for renaming VM-record keys. The mechanism was identity-only and applied inconsistently (only `register_vm` honored it; every other mutator hardcoded literal keys). It has been removed. The template no longer ships it. Existing installs that customised `db.yaml` keep their `fields:` block on upgrade (conffile semantics) — the code ignores it, so the orphaned block is harmless.
 
 ### `/etc/blockhost/web3-defaults.yaml`
 
@@ -460,13 +529,19 @@ The root agent (`root_agent_actions/system.py`) provides two actions for hidden 
   ├── db.yaml                    # Config template (conffile)
   └── web3-defaults.yaml         # Config template (conffile)
 
+/usr/bin/
+  ├── blockhost-vmdb             # CLI wrapper for VMDatabaseBase (see §6a)
+  └── blockhost-network-hook     # CLI wrapper for network_hook (see §6a)
+
 /usr/lib/python3/dist-packages/blockhost/
-  ├── __init__.py                # Package entry, re-exports
+  ├── __init__.py                # Package entry, re-exports (incl. naming validators)
   ├── config.py                  # Configuration loading
   ├── vm_db.py                   # VM database abstraction
   ├── provisioner.py             # Provisioner dispatcher
   ├── root_agent.py              # Root agent client
-  └── cloud_init.py              # Template rendering
+  ├── cloud_init.py              # Template rendering
+  ├── naming.py                  # Domain-name validators (see §5a)
+  └── network_hook.py            # Connection endpoint resolution (see §7)
 
 /usr/share/blockhost/
   ├── root-agent/
@@ -483,7 +558,7 @@ The root agent (`root_agent_actions/system.py`) provides two actions for hidden 
 /var/lib/blockhost/              # Data directory (created by postinst, mode 750)
 ```
 
-**No CLI tools in `/usr/bin/`** — common has no commands, only libraries and daemon.
+**CLI tools** (see §6a): `/usr/bin/blockhost-vmdb` and `/usr/bin/blockhost-network-hook` are thin wrappers over the Python API for engines that prefer one exec over `python3 -c "<inline>"`.
 
 ---
 

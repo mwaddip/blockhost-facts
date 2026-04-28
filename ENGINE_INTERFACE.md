@@ -545,10 +545,10 @@ The monitor is the adapter boundary between the chain and the provisioner. It tr
 2. Decode events against contract ABI
 3. Dispatch to event handlers (see below)
 4. Process admin commands (if configured)
-5. Periodic tasks (on their own intervals, all `await`ed, all guarded by `isPipelineBusy()`):
-   - **Reconciliation:** every 5 minutes
-   - **Fund cycle:** every 24 hours (configurable)
-   - **Gas check:** every 30 minutes (configurable)
+5. Periodic tasks (on their own engine-defined intervals, all `await`ed, all guarded by `isPipelineBusy()`):
+   - **Reconciliation:** at the engine's discretion, sized to the chain's block time (e.g. ~6 block times for slow chains like Bitcoin/OPNet ≈ 1 hour, more frequent for fast chains like EVM ≈ 5 minutes)
+   - **Fund cycle:** every 24 hours (configurable; block-based preferred — see §4)
+   - **Gas check:** every 30 minutes (configurable; block-based preferred — see §4)
 
 **Background task scheduling:** Reconciliation, fund cycle, and gas check are launched in the same polling cycle as event handlers. Each runs on its own interval and `await`s to completion (not fire-and-forget). There is no pipeline gate — handlers and background tasks share the polling tick and rely on the reconciler to clean up after partial failures.
 
@@ -566,7 +566,7 @@ The monitor is the adapter boundary between the chain and the provisioner. It tr
 9. Call provisioner: `blockhost-vm-update-gecos blockhost-NNN <subscriber> --nft-id <actual_token_id>`
 10. Mark NFT minted via `blockhost.vm_db.set_nft_minted(vm_name, token_id)`
 
-No token reservation. The actual minted token ID comes from `blockhost-mint-nft` stdout, then gets baked into GECOS via `update-gecos`. If any step fails partway, the reconciler picks up missing NFTs on its 5-minute cycle.
+No token reservation. The actual minted token ID comes from `blockhost-mint-nft` stdout, then gets baked into GECOS via `update-gecos`. If any step fails partway, the reconciler picks up missing NFTs on its next cycle.
 
 **`SubscriptionExtended`:**
 1. Calculate additional days
@@ -581,7 +581,7 @@ Log only (informational).
 
 ### NFT Reconciliation
 
-**Interval:** 5 minutes.
+**Interval:** engine-defined. Reasonable starting points: ~6 block times for slow chains (Bitcoin/OPNet ≈ 1 hour), more frequent for fast chains (EVM ≈ 5 minutes). Consumers don't need to know the exact cadence — only that the engine reconciles regularly. Use block-height delta for scheduling rather than wall clock; see §4 for the same principle applied to fund-manager intervals.
 
 Verifies local `vms.json` NFT state matches on-chain. Two responsibilities:
 
@@ -607,7 +607,7 @@ On SIGINT: `closeAllKnocks()` (if admin commands enabled) → `process.exit(0)`.
 
 Automated financial operations, integrated into the monitor polling loop.
 
-### Fund Cycle (default: every 24 hours)
+### Fund Cycle (default: every 24 hours; block-based preferred)
 
 1. **Load addressbook**, ensure hot wallet exists (auto-generate via root agent if missing)
 2. **Withdraw** — for each active payment method with balance > `min_withdrawal_usd`: call `contract.withdrawFunds(token, hot_wallet)`
@@ -615,14 +615,14 @@ Automated financial operations, integrated into the monitor polling loop.
 4. **Server stablecoin buffer** — if `server.stablecoin < server_stablecoin_buffer_usd`, hot sends stablecoin to server
 5. **Revenue shares** — if enabled in `revenue-share.json`, hot distributes configured % to dev, broker
 6. **Remainder to admin** — all remaining hot wallet token balances → admin
-7. **Update state:** `last_fund_cycle = Date.now()`
+7. **Update state:** record block height (preferred) and/or `Date.now()` — see §6 schema
 
-### Gas Check (default: every 30 minutes)
+### Gas Check (default: every 30 minutes; block-based preferred)
 
 1. Check server wallet ETH balance (convert to USD via Uniswap V2 pair)
 2. If below `gas_low_threshold_usd`: swap `gas_swap_amount_usd` of USDC → ETH
 3. Top up hot wallet gas if needed
-4. **Update state:** `last_gas_check = Date.now()`
+4. **Update state:** record block height (preferred) and/or `Date.now()` — see §6 schema
 
 ### Hot Wallet
 
@@ -635,7 +635,20 @@ Auto-generated on first fund cycle if not in addressbook:
 
 **`/etc/blockhost/blockhost.yaml`** — under `fund_manager:` key (all settings have defaults, entire section optional).
 
-Threshold key naming follows the pattern `<purpose>_<unit>` where `<unit>` is the chain's native base unit. Each engine ships its own defaults and reads keys named for its chain. The interval keys (`fund_cycle_interval_hours`, `gas_check_interval_minutes`) are universal across all engines.
+Threshold key naming follows the pattern `<purpose>_<unit>` where `<unit>` is the chain's native base unit. Each engine ships its own defaults and reads keys named for its chain.
+
+#### Interval keys
+
+Interval keys come in two forms — **block-based (preferred)** and time-based (legacy). Engines accept both; new engines should use block-based per the project principle "block height over timestamps" (timestamps are vulnerable to NTP backward steps and have no relationship to chain progress). If both are set, the block-based key wins. If neither, the engine's default interval applies (which itself should be block-based going forward).
+
+| Engine | Block-based suffix | Time-based suffix (legacy) |
+|--------|--------------------|----------------------------|
+| EVM | `_blocks` | `_hours`, `_minutes` |
+| OPNet | `_blocks` | `_hours`, `_minutes` |
+| Cardano | `_slots` (or `_blocks`) | `_hours`, `_minutes` |
+| Ergo | `_blocks` | `_hours`, `_minutes` |
+
+#### Threshold unit suffixes
 
 | Engine | Native unit suffix | Stablecoin unit suffix |
 |--------|-------------------|----------------------|
@@ -646,12 +659,12 @@ Threshold key naming follows the pattern `<purpose>_<unit>` where `<unit>` is th
 
 EVM uses USD-denominated values for stablecoin thresholds because Uniswap V2 price discovery converts stablecoin↔ETH on the fly. The other engines use base units directly because they don't perform live USD conversion.
 
-**Example (EVM):**
+**Example (EVM, block-based — preferred):**
 
 ```yaml
 fund_manager:
-  fund_cycle_interval_hours: 24
-  gas_check_interval_minutes: 30
+  fund_cycle_interval_blocks: 7200            # ~24h on Ethereum mainnet (12s blocks)
+  gas_check_interval_blocks: 150              # ~30min
   min_withdrawal_usd: 50
   gas_low_threshold_usd: 5
   gas_swap_amount_usd: 20
@@ -659,12 +672,22 @@ fund_manager:
   hot_wallet_gas_eth: 0.01
 ```
 
-**Example (Cardano — all values in lovelace, 1 ADA = 1,000,000 lovelace):**
+**Example (OPNet, block-based — preferred; Bitcoin ~10min blocks):**
 
 ```yaml
 fund_manager:
-  fund_cycle_interval_hours: 24
-  gas_check_interval_minutes: 30
+  fund_cycle_interval_blocks: 144             # ~24h
+  gas_check_interval_blocks: 3                # ~30min
+  min_withdrawal_sats: 100000
+  ...
+```
+
+**Example (Cardano, all values in lovelace; legacy time-based form still accepted):**
+
+```yaml
+fund_manager:
+  fund_cycle_interval_hours: 24               # legacy — block-based preferred
+  gas_check_interval_minutes: 30              # legacy
   min_withdrawal_lovelace: 50000000           # 50 ADA
   gas_low_threshold_lovelace: 5000000         # 5 ADA
   gas_swap_amount_lovelace: 10000000          # 10 ADA
@@ -672,7 +695,7 @@ fund_manager:
   hot_wallet_gas_lovelace: 5000000            # 5 ADA
 ```
 
-OPNet substitutes `_sats`, Ergo substitutes `_nanoerg` in the same positions.
+OPNet substitutes `_sats`, Ergo substitutes `_nanoerg` in the same positions for thresholds.
 
 ### DEX Integration
 
@@ -813,13 +836,19 @@ admin:
 
 ### `fund-manager-state.json` Schema
 
+Schema accepts either block-based or timestamp-based fields. Block-based is preferred for new engines (see §4 "Interval keys"). Engines write whichever fields match the interval mode they use; both can coexist for backwards-compat.
+
 ```json
 {
-  "last_fund_cycle": 0,        // Unix timestamp (ms) of last fund cycle
-  "last_gas_check": 0,         // Unix timestamp (ms) of last gas check
-  "hot_wallet_generated": false // Whether hot wallet has been created
+  "last_fund_cycle_block": 800123,        // Block height of last fund cycle (preferred)
+  "last_gas_check_block": 800120,         // Block height of last gas check (preferred)
+  "last_fund_cycle": 1709300000000,       // Legacy: ms timestamp (still accepted)
+  "last_gas_check": 1709300000000,        // Legacy: ms timestamp (still accepted)
+  "hot_wallet_generated": false           // Whether hot wallet has been created
 }
 ```
+
+When deciding whether to run, engines compute `currentBlock - state.last_fund_cycle_block >= interval_blocks` (block-based) or `Date.now() - state.last_fund_cycle >= interval_ms` (time-based). If both keys are present, block-based wins.
 
 **Location:** `/var/lib/blockhost/fund-manager-state.json`
 **Owner:** `blockhost:blockhost`

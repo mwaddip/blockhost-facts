@@ -148,7 +148,7 @@ blockhost-vm-create <name>
 | `vm_name` | string | The name passed in. Echo back for confirmation. |
 | `ip` | string | Assigned IPv4 address. |
 | `ipv6` | string | Assigned IPv6 address (may be empty if broker unavailable). |
-| `vmid` | int or string | Hypervisor-specific VM ID. Integer for Proxmox, domain name for libvirt. |
+| `vmid` | int or string | Hypervisor-specific VM ID. Integer for Proxmox, domain name (string) for libvirt. The DB record stores `0` for libvirt; consumers should treat `vm_name` as the canonical key. |
 | `nft_token_id` | int or null | NFT token ID (echo of `--nft-token-id` if provided, null otherwise). |
 | `username` | string | SSH username created in the VM. |
 
@@ -562,17 +562,23 @@ Action names are provisioner-specific (each provisioner namespaces with its hype
 | Action | Proxmox (`qm.py`) | libvirt (`virsh.py`) |
 |--------|:-----------------:|:--------------------:|
 | start | `qm-start` | `virsh-start` |
-| stop / shutdown | `qm-stop`, `qm-shutdown` | `virsh-shutdown` |
-| destroy / undefine | `qm-destroy` | `virsh-destroy`, `virsh-undefine` |
-| reboot | — | `virsh-reboot` |
-| create / define | `qm-create` | `virsh-define` |
-| import disk | `qm-importdisk` | — |
-| set config | `qm-set` | — |
-| template | `qm-template` | — |
-| update GECOS | `qm-update-gecos` | `virsh-update-gecos` |
-| bandwidth throttle | `pve-set-throttle`, `tc-rate-limit` | — (not yet ported) |
+| graceful shutdown | `qm-shutdown` | `virsh-shutdown` |
+| force stop | `qm-stop` | `virsh-destroy` *(libvirt naming — destroys the running domain, not the disk)* |
+| destroy / undefine | `qm-destroy` *(`--purge`)* | `virsh-undefine` |
+| define / create | — *(build-template runs `qm` directly)* | `virsh-define` |
+| guest exec | `qm-guest-exec` | `virsh-guest-exec` |
+| bandwidth/IO throttle | `pve-set-throttle`, `tc-rate-limit` | — *(uses cgroups via `virsh schedinfo`, no root-agent action needed)* |
 
-The libvirt provisioner does not ship throttle/rate-limit actions yet — `vm-throttle.py` exists as a CLI but uses a different mechanism (cgroups via virsh schedinfo) that doesn't require a root agent action.
+Notes on the Proxmox column:
+
+- The `qm-create`/`qm-importdisk`/`qm-set`/`qm-template` actions that earlier versions of this contract listed have been removed. They were used only by the template builder; `build-template.sh` now runs `qm` directly via shell (it already runs as root from `finalize_template`, so the privilege boundary doesn't apply).
+- The `qm-update-gecos` action has been removed. `vm-update-gecos.sh` now delegates to `blockhost-vm-guest-exec`, which uses `qm-guest-exec` — the same primitive everything else uses for in-VM commands.
+
+Notes on the libvirt column:
+
+- `virsh-reboot` is not in the action set. Reboots are handled by `virsh-destroy` followed by `virsh-start` if a caller needs that semantics.
+- `virsh-destroy` in libvirt is a force-stop on the running domain (not a disk-destroy); `virsh-undefine` removes the persistent config. Together they implement the equivalent of Proxmox's `qm-destroy --purge`.
+- libvirt does not ship a throttle action — `vm-throttle.py` exists as a CLI but uses cgroups via `virsh schedinfo`, which doesn't require a root agent action.
 
 ### Handler Signature
 
@@ -662,6 +668,31 @@ Provisioners typically ship a GC timer for daily cleanup of expired VMs.
 | `blockhost-gc.service` | Oneshot | Runs `blockhost-vm-gc --execute` as `blockhost:blockhost` |
 
 Installed to `/usr/lib/systemd/system/`. Enabled and started by the `.deb` postinst script.
+
+---
+
+## 6a. Provisioning Lock
+
+A file at `/run/blockhost/provisioning.lock` signals that a `create` operation is in flight. Engine reconcilers MUST check this file before reading `vms.json` and defer reconciliation while it is present.
+
+| Aspect | Spec |
+|--------|------|
+| **Path** | `/run/blockhost/provisioning.lock` |
+| **Contents** | Decimal PID of the create process (no trailing newline required) |
+| **Owner / mode** | Whatever user the provisioner runs as (typically `blockhost`); permissions are `0644` from `Path.write_text` defaults |
+| **Lifecycle** | Created when `create` command starts; removed on exit (normal, error, SIGINT, SIGTERM). Provisioners are responsible for `try`/`finally` (or equivalent) cleanup. |
+| **Scope** | ONLY the `create` command takes this lock. Other commands (`destroy`, `start`, `resume`, `update-gecos`, `guest-exec`) do not. |
+| **Stale-detection** | Provisioner-side. On acquire, if the file already exists and the recorded PID is dead, remove and proceed. If alive, abort with non-zero exit. |
+| **Mock mode** | Provisioners SHOULD skip the lock when run with `--mock` (no real DB, no engine to race against). |
+
+**Engine responsibilities:**
+- Check `existsSync("/run/blockhost/provisioning.lock")` (or equivalent) before reconciliation reads `vms.json`.
+- If present, defer reconciliation to the next cycle. Do not try to read the lock's PID — provisioner owns those semantics.
+- Do not attempt to take or remove the lock. It is provisioner-owned.
+
+**Why `/run/blockhost/`:** the directory is created (root:blockhost, mode 2775) by the engine's systemd unit's `ExecStartPre`. Provisioners run as `blockhost` and can write here. The `/run` location ensures the lock is cleared on host reboot — a stale lock from a crashed `create` won't survive a reboot.
+
+This contract supersedes earlier `pgrep`-based heuristics in engine reconcilers (which produced false positives matching log viewers, monitors, and any process whose argv contained the create-command name).
 
 ---
 
