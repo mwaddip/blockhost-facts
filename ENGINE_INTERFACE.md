@@ -743,10 +743,13 @@ Encrypted on-chain commands from the admin wallet, processed by the monitor.
 admin:
   wallet_address: "0x..."           # Admin wallet that sends commands
   credential_nft_id: 0              # NFT token ID for admin auth
-  max_command_age: 300              # Reject commands older than N seconds
+  max_command_age_blocks: 30        # Preferred. Reject commands older than N blocks.
+  max_command_age: 300              # Legacy: seconds. Block-based wins if both set.
   destination_mode: "self"          # "any" | "self" | "server" | "null"
   destination_address: "0x..."      # For "null" mode (optional)
 ```
+
+Block-based freshness is preferred per §3 "Timing Rule" — wall-clock timestamps are vulnerable to NTP skew between admin host and engine host and have no relationship to chain progress. Suggested defaults per chain (≈5 minute window): Ethereum ~12s blocks → 25 blocks; Cardano ~20s slots → 15 slots; OPNet ~10min blocks → 1 block; Ergo ~120s blocks → 3 blocks.
 
 ### Command Database
 
@@ -777,7 +780,7 @@ admin:
    - `null`: only `tx.to == destination_address`
 3. ECIES decryption of `tx.data` using `/etc/blockhost/server.key`
 4. Parse JSON payload, validate command format
-5. Timestamp check (not older than `max_command_age`, not in future)
+5. **Freshness check** — block-based when payload carries `block_height` AND `max_command_age_blocks` is set: reject if `current_height - payload.block_height > max_command_age_blocks` or `payload.block_height > current_height + skew_tolerance` (suggest 2-block future tolerance). Otherwise fall back to timestamp check using `payload.timestamp` and `max_command_age` (seconds). Block-based wins when both are present.
 6. Nonce anti-replay check (each nonce used only once)
 7. Dispatch to action handler (lookup in command database)
 8. Log result
@@ -789,9 +792,12 @@ admin:
   "command": "secret-command-name",
   "params": {"ports": [22], "duration": 60, "source": "2001:db8::1"},
   "nonce": "uuid-string",
+  "block_height": 1708000,
   "timestamp": 1708000000
 }
 ```
+
+`block_height` is preferred (chain height when the command was issued); `timestamp` (Unix seconds) is legacy. Block-based wins when both are present. Note that `params.duration` (e.g. `knock.duration`) stays in seconds — it controls a wall-clock action on the host (firewall close), not chain freshness.
 
 ### Implemented Handlers
 
