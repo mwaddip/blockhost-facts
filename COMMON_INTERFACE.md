@@ -60,14 +60,14 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
-| `register_vm` | `(name, vmid, ip, ipv6=None, owner="", expiry_days=30, purpose="", wallet_address=None, username=None)` | `dict` (VM record) | Creates new record. Rejects duplicate `name` regardless of status — call `delete_vm` first to clobber a destroyed record. |
+| `register_vm` | `(name, vmid, ip, ipv6=None, owner="", expiry_days=30, purpose="", wallet_address=None, username=None)` | `dict` (VM record) | **Provisioner-owned.** Creates new record. Rejects duplicate `name` regardless of status — call `delete_vm` first to clobber a destroyed record. The provisioner calls this from `vm-create` before printing its result line; engines do NOT call it. |
 | `get_vm` | `(name)` | `Optional[dict]` | Lookup by name |
 | `list_vms` | `(status=None)` | `list[dict]` | Filter: `"active"`, `"suspended"`, `"destroyed"`, or `None` for all |
-| `extend_expiry` | `(name, days)` | `None` | Extends from current expiry |
+| `extend_expiry` | `(name, days)` | `None` | Engine-owned. Extends from current expiry. |
 | `mark_suspended` | `(name)` | `None` | Sets status + suspended_at |
 | `mark_active` | `(name, new_expiry=None)` | `None` | Reactivates, optionally sets new expiry |
-| `mark_destroyed` | `(name)` | `None` | Sets status + destroyed_at, releases IPs |
-| `delete_vm` | `(name)` | `None` | Permanently removes the record. Releases IPv4/IPv6 allocations. Raises `ValueError` if not found. Used for destroyed-name reuse — provisioners call this before re-registering a name that previously belonged to a destroyed VM. |
+| `mark_destroyed` | `(name)` | `None` | **Provisioner-owned.** Sets status + destroyed_at, releases IPs. The provisioner calls this from `vm-destroy` after the VM is gone; engines do NOT call it. |
+| `delete_vm` | `(name)` | `None` | **Provisioner-owned.** Permanently removes the record. Releases IPv4/IPv6 allocations. Raises `ValueError` if not found. Used for destroyed-name reuse — provisioners call this before re-registering a name that previously belonged to a destroyed VM. |
 
 #### Allocation
 
@@ -373,6 +373,8 @@ Wraps `VMDatabaseBase` methods that engines need at provisioning time.
 | `get-vm` | `<vm_name>` | JSON-encoded VM record | 0 ok / 1 not found | `VMDatabaseBase.get_vm` |
 | `mark-nft-minted` | `<vm_name> <token_id>` | (empty) | 0 ok / 1 not found | `VMDatabaseBase.set_nft_minted` |
 | `extend-expiry` | `<vm_name> <days>` | line 1: confirmation; line 2: `NEEDS_RESUME` (only if VM was suspended at extend time) | 0 ok / 1 not found | `VMDatabaseBase.extend_expiry` (with status check around it) |
+
+**Subcommands intentionally absent.** `register-vm` and `mark-destroyed` are not exposed via this CLI. They are provisioner-owned (see `§2 VM Lifecycle`) — the provisioner calls them directly via `from blockhost.vm_db import get_database`, since provisioners are Python and don't need a CLI bridge. Adding a `register-vm` subcommand would re-introduce the engine→common bridge that this CLI was meant to eliminate.
 
 **Note on `mark-nft-minted` signature.** Some earlier engine prompts suggested `mark-nft-minted <token_id> <owner_wallet>`. That doesn't match the underlying API (`set_nft_minted(vm_name, token_id)`), and the engine handler already knows `vm_name` at mint time (it just provisioned the VM). The CLI mirrors the Python signature to avoid a parallel wallet→VM lookup.
 

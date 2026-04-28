@@ -385,11 +385,21 @@ blockhost-mint-nft \
 
 **Implementation:** Calls `mint(address, userEncrypted)` on the AccessCredentialNFT contract (2 params). Returns the minted token ID on stdout.
 
+**Output format:** On success, the canonical result line MUST be prefixed with the literal string `BLOCKHOST_RESULT: ` (note the trailing space) followed by the token ID as a single integer. Other lines are informational and ignored by consumers.
+
+```
+[INFO] Submitting mint tx ...
+[INFO] Tx confirmed in block 12345
+BLOCKHOST_RESULT: 42
+```
+
+Consumers parse by sentinel prefix: scan stdout lines for `BLOCKHOST_RESULT: ` and parse the suffix as an integer. Lines without the prefix are not part of the contract.
+
 **Consumers:**
 - Monitor event handler (CLI: `blockhost-mint-nft --owner-wallet ... --user-encrypted ...`)
 - Engine wizard `finalize_mint_nft()` (CLI call)
 
-**Exit:** 0/1. stdout = token ID on success.
+**Exit:** 0/1. stdout = sentinel-prefixed token ID on success.
 
 ---
 
@@ -559,14 +569,15 @@ The monitor is the adapter boundary between the chain and the provisioner. It tr
 2. Calculate expiry days from `expiresAt` timestamp
 3. Decrypt `userEncrypted` using server private key (ECIES). If decryption fails, abort before creating VM.
 4. Call provisioner: `blockhost-vm-create blockhost-NNN --owner-wallet <subscriber> --expiry-days <days> --apply`
-5. Parse JSON output from provisioner (ip, vmid, ipv6, username)
-6. Register VM in `vms.json` via `blockhost.vm_db.register_vm`
-7. Encrypt connection details (hostname, port, username) using decrypted user signature (symmetric)
-8. Call: `blockhost-mint-nft --owner-wallet <subscriber> --user-encrypted <encrypted_details>` → capture token ID from stdout
-9. Call provisioner: `blockhost-vm-update-gecos blockhost-NNN <subscriber> --nft-id <actual_token_id>`
-10. Mark NFT minted via `blockhost.vm_db.set_nft_minted(vm_name, token_id)`
+5. Parse the provisioner's `BLOCKHOST_RESULT:`-prefixed JSON line (ip, vmid, ipv6, username) — see `PROVISIONER_INTERFACE.md §2`. **The provisioner has already registered the VM in `vms.json` at this point.**
+6. Encrypt connection details (hostname, port, username) using decrypted user signature (symmetric)
+7. Call: `blockhost-mint-nft --owner-wallet <subscriber> --user-encrypted <encrypted_details>` → parse the `BLOCKHOST_RESULT:`-prefixed token ID from stdout
+8. Call provisioner: `blockhost-vm-update-gecos blockhost-NNN <subscriber> --nft-id <actual_token_id>`
+9. Mark NFT minted via `blockhost-vmdb mark-nft-minted <vm_name> <token_id>` (or the underlying Python API)
 
 No token reservation. The actual minted token ID comes from `blockhost-mint-nft` stdout, then gets baked into GECOS via `update-gecos`. If any step fails partway, the reconciler picks up missing NFTs on its next cycle.
+
+**Database ownership:** the engine does NOT call `register_vm`. The provisioner owns VM-record creation as part of `vm-create` — by the time the provisioner returns its result line, the record already exists in `vms.json`. See `PROVISIONER_INTERFACE.md §2 vm-create / Database side effects` for the contract on the provisioner side. Engines only call NFT-related vm_db methods (`set_nft_minted`, `extend_expiry`).
 
 **`SubscriptionExtended`:**
 1. Calculate additional days
@@ -575,6 +586,8 @@ No token reservation. The actual minted token ID comes from `blockhost-mint-nft`
 
 **`SubscriptionCancelled`:**
 1. Call provisioner: `blockhost-vm-destroy blockhost-NNN`
+
+The provisioner owns `mark_destroyed` as part of `vm-destroy`. The engine does NOT mark the record destroyed itself; the provisioner does so after the VM is gone. See `PROVISIONER_INTERFACE.md §2 vm-destroy / Database side effects`.
 
 **`PlanCreated`, `PlanUpdated`:**
 Log only (informational).

@@ -90,9 +90,9 @@ All commands are resolved through the manifest. The engine calls `getCommand("cr
 ### Common Conventions
 
 - Exit 0 = success, non-zero = failure
-- stdout = structured output when applicable (JSON for `create`, `list`)
 - stderr = human-readable progress/error text
 - All commands receive **VM name** as the primary identifier (not VMID — the name is hypervisor-agnostic)
+- For commands with a structured result (today: `create`), the canonical result line on stdout MUST be prefixed with the literal string `BLOCKHOST_RESULT: ` (note the trailing space) followed by a single-line JSON object. Provisioners MUST emit exactly one such line on success. Other stdout content is informational; consumers parse by sentinel prefix only. Commands without a structured result (e.g. `start`, `stop`, `destroy`) print free-form progress text only.
 
 ---
 
@@ -129,7 +129,17 @@ blockhost-vm-create <name>
 | `--cloud-init-content` | no | — | Path to pre-rendered cloud-init YAML. If absent, provisioner renders its own using `blockhost.cloud_init.render_cloud_init()`. |
 | `--mock` | no | false | Use mock database. |
 
-**stdout on success (JSON):**
+**stdout on success:** Exactly one `BLOCKHOST_RESULT:`-prefixed line containing the JSON summary. Other lines may carry informational progress text — they are not part of the contract.
+
+```
+[INFO] Cloning template ...
+[INFO] Setting cloud-init userdata
+[INFO] Starting VM 105
+BLOCKHOST_RESULT: {"status":"ok","vm_name":"myvm","ip":"192.168.1.100","ipv6":"2001:db8::100","vmid":100,"nft_token_id":null,"username":"user"}
+```
+
+JSON shape:
+
 ```json
 {
   "status": "ok",
@@ -156,6 +166,21 @@ blockhost-vm-create <name>
 
 **Exit:** 0 on success, 1 on failure (stderr has error details).
 
+#### Database side effects
+
+The provisioner MUST call `blockhost.vm_db.register_vm` with the same data it will emit in the `BLOCKHOST_RESULT:` line, **before** printing the result. This places VM-record ownership on the side that knows for certain the VM exists (the provisioner just created it) and removes the engine→common bridge.
+
+Sequence:
+
+1. Allocate resources (VMID, IPv4, IPv6) via `blockhost.vm_db` allocators.
+2. Provision the VM (qemu/libvirt/proxmox-specific work).
+3. Call `register_vm(name=..., vmid=..., ip=..., ipv6=..., owner=..., expiry_days=..., wallet_address=..., username=...)`.
+4. Print the `BLOCKHOST_RESULT:` line.
+
+If `register_vm` raises (e.g. duplicate name), the provisioner MUST destroy the partially-created VM and exit non-zero. Engines do not call `register_vm` themselves.
+
+**Migration / idempotency:** during the rollout there is a brief window where an old engine still calls `register_vm` after the new provisioner has already done so. The duplicate call raises `ValueError`; engines that handle this gracefully (warn-and-continue) tolerate the migration. Provisioners deploy before engines.
+
 ---
 
 ### `destroy`
@@ -168,6 +193,12 @@ Must be **idempotent** — destroying an already-destroyed VM is not an error. C
 
 **stdout:** Progress text.
 **Exit:** 0/1.
+
+#### Database side effects
+
+The provisioner MUST call `blockhost.vm_db.mark_destroyed(name)` after the VM is gone (and IPs released). This pairs with `register_vm` in `vm-create`: the provisioner owns the lifecycle endpoints because it owns the timing — the engine has no reliable way to know the VM is fully gone except by re-querying the provisioner.
+
+If `mark_destroyed` raises (e.g. record already in destroyed state, idempotent destroy), the provisioner SHOULD log and continue — destroy is idempotent.
 
 ---
 
