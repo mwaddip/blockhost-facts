@@ -89,18 +89,18 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 | `get_vms_to_destroy` | `(grace_days)` | `list[dict]` | Suspended VMs past grace period |
 | `get_expired_vms` | `(grace_days=0)` | `list[dict]` | All VMs past expiry + grace |
 
-#### Chain State Recording
+#### Engine-Owned Mutators
 
-Mutators that record on-chain provisioning state onto the local VM record. Routed through `_atomic_update` so they serialise with all other mutators on the same lockfile.
+Engine-side writes to a VM record. Common stays agnostic about the *meaning* of fields engines write; it only enforces atomicity (lockfile) and basic existence semantics. Routed through `_atomic_update` so they serialise with all other mutators.
 
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
-| `set_nft_minted` | `(vm_name, token_id)` | `None` | Records the minted NFT on the VM record. Sets `nft_token_id`, `nft_minted = True`, `nft_minted_at`. Raises `ValueError` if VM not found. |
-| `update_beacon_info` | `(vm_name, beacon_name, utxo_ref)` | `bool` | Sets `beacon_name` and `utxo_ref` on an existing VM record. Returns `False` if `vm_name` not found (no-op, no exception); `True` on success. |
+| `set_nft_minted` | `(vm_name, token_id)` | `None` | Records the minted access NFT. Sets `nft_token_id`, `nft_minted = True`, `nft_minted_at`. Raises `ValueError` if VM not found. NFT minting is the universal access-credential pattern across all engines, so the typed convenience method stays. |
+| `update_fields` | `(vm_name, fields: dict)` | `bool` | Merges `fields` into the VM record. Returns `False` if `vm_name` not found (no-op, no exception); `True` on success. **Generic — common does not know what keys an engine writes.** Engines pick their own field names (e.g. cardano writes `beacon_name`/`utxo_ref`; EVM may write `subscription_tx_hash`; etc.). Reserved keys that are managed by other mutators (`vm_name`, `vmid`, `status`, `created_at`, `expires_at`, `suspended_at`, `destroyed_at`, `ip_address`, `ipv6_address`, `nft_token_id`, `nft_minted`, `nft_minted_at`) MUST NOT be overwritten via this method — common rejects such updates. |
 
-**Note on `update_beacon_info` return convention.** Every other mutator on `VMDatabaseBase` raises `ValueError` when the target VM is missing. `update_beacon_info` is the deliberate exception: callers invoke it after a chain commit, and a concurrent VM deletion shouldn't blow up the post-commit handler with an exception that's not actionable. Returning `False` lets the caller race a deletion safely. Future `update_*_info`-style mutators that face the same race should follow this convention.
+**On `update_fields` return convention.** Every other mutator on `VMDatabaseBase` raises `ValueError` when the target VM is missing. `update_fields` is the deliberate exception: engines invoke it after a chain commit, and a concurrent VM deletion shouldn't crash the post-commit handler with an exception that's not actionable. Returning `False` lets the caller race a deletion safely.
 
-**Note on field naming.** `beacon_name` and `utxo_ref` are Cardano-specific terminology — beacons are Cardano's chain-side provisioning markers, UTxO refs are Cardano transaction outputs. The method and fields are nominally chain-specific; other chains writing analogous state may grow their own fields in the same `vms[vm_name]` dict (no schema migration), or this method may evolve into a generic `update_chain_state(vm_name, **fields)` form if multiple chains start needing similar writes. For now, the Cardano-specific shape is acknowledged.
+**On field-name agnosticism.** Common does not know which chain stores which keys. The schema is open: any engine-defined key may appear inline on `vms[vm_name]`. Engines own their own naming. Documenting this here means the contract doesn't grow chain-specific surface every time an engine adds a field.
 
 There is no separate NFT reservation lifecycle. The engine handler mints the NFT (the chain assigns the token ID), reads the actual token ID from `blockhost-mint-nft` stdout, then calls `set_nft_minted()` to record it. If anything fails between mint and recording, the reconciler picks it up by querying `ownerOf(tokenId)` on-chain and matching back to the VM. Local pre-mint reservation is intentionally absent.
 
@@ -124,11 +124,12 @@ There is no separate NFT reservation lifecycle. The engine handler mints the NFT
     "nft_token_id": Optional[int],     # Added by set_nft_minted()
     "nft_minted": Optional[bool],      # Added by set_nft_minted()
     "nft_minted_at": Optional[str],    # Added by set_nft_minted() — ISO 8601
-    "beacon_name": Optional[str],      # Added by update_beacon_info() — chain-defined; today: Cardano provisioning beacon
-    "utxo_ref": Optional[str],         # Added by update_beacon_info() — chain-defined; today: Cardano UTxO reference
     "gecos_synced": Optional[bool],    # Set by reconciler when GECOS update succeeds
+    # ... plus arbitrary engine-defined keys merged via update_fields()
 }
 ```
+
+The schema is open: engines write chain-specific keys via `update_fields()` and they appear inline alongside the keys above. Common does not know what keys an engine writes; consumers reading those keys must know which engine populated them.
 
 NFT state is stored inline on the VM record. There is no top-level `reserved_nft_tokens` map.
 
@@ -145,7 +146,7 @@ Production (`VMDatabase`) uses a separate lockfile at `{db_file}.lock` to avoid 
 
 `_atomic_update` is abstract on `VMDatabaseBase`. `VMDatabase` implements it with `fcntl.LOCK_EX` on the lockfile. `MockVMDatabase` implements it as a passthrough (read → mutate → write, no locking).
 
-All mutating methods in the base class use `_atomic_update`: `register_vm`, `mark_suspended`, `mark_active`, `mark_destroyed`, `allocate_ip`, `allocate_ipv6`, `allocate_vmid`, `extend_expiry`, `set_nft_minted`, `update_beacon_info`, `delete_vm`. Plus `release_ip` and `release_ipv6` on `VMDatabase`.
+All mutating methods in the base class use `_atomic_update`: `register_vm`, `mark_suspended`, `mark_active`, `mark_destroyed`, `allocate_ip`, `allocate_ipv6`, `allocate_vmid`, `extend_expiry`, `set_nft_minted`, `update_fields`, `delete_vm`. Plus `release_ip` and `release_ipv6` on `VMDatabase`.
 
 ### Storage
 
@@ -382,6 +383,15 @@ Wraps `VMDatabaseBase` methods that engines need at provisioning time.
 | `get-vm` | `<vm_name>` | JSON-encoded VM record | 0 ok / 1 not found | `VMDatabaseBase.get_vm` |
 | `mark-nft-minted` | `<vm_name> <token_id>` | (empty) | 0 ok / 1 not found | `VMDatabaseBase.set_nft_minted` |
 | `extend-expiry` | `<vm_name> <days>` | line 1: confirmation; line 2: `NEEDS_RESUME` (only if VM was suspended at extend time) | 0 ok / 1 not found | `VMDatabaseBase.extend_expiry` (with status check around it) |
+| `update-fields` | `<vm_name> --fields <json>` | (empty) | 0 ok / 1 not found / 2 invalid (e.g. reserved key) | `VMDatabaseBase.update_fields` |
+
+**`update-fields` form.** `--fields` takes a single JSON object whose keys/values are merged into the VM record. Example:
+
+```
+blockhost-vmdb update-fields blockhost-001 --fields '{"beacon_name":"abcd","utxo_ref":"tx#0"}'
+```
+
+Common neither knows nor cares what those keys mean — engines pick names that fit their chain. Reserved keys managed by other mutators (see `§2 Engine-Owned Mutators`) cannot be overwritten via this subcommand and produce exit 2.
 
 **Subcommands intentionally absent.** `register-vm` and `mark-destroyed` are not exposed via this CLI. They are provisioner-owned (see `§2 VM Lifecycle`) — the provisioner calls them directly via `from blockhost.vm_db import get_database`, since provisioners are Python and don't need a CLI bridge. Adding a `register-vm` subcommand would re-introduce the engine→common bridge that this CLI was meant to eliminate.
 
