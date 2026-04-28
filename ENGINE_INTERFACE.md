@@ -745,8 +745,6 @@ admin:
   credential_nft_id: 0              # NFT token ID for admin auth
   max_command_age_blocks: 30        # Preferred. Reject commands older than N blocks.
   max_command_age: 300              # Legacy: seconds. Block-based wins if both set.
-  destination_mode: "self"          # "any" | "self" | "server" | "null"
-  destination_address: "0x..."      # For "null" mode (optional)
 ```
 
 Block-based freshness is preferred per §3 "Timing Rule" — wall-clock timestamps are vulnerable to NTP skew between admin host and engine host and have no relationship to chain progress. Suggested defaults per chain (≈5 minute window): Ethereum ~12s blocks → 25 blocks; Cardano ~20s slots → 15 slots; OPNet ~10min blocks → 1 block; Ergo ~120s blocks → 3 blocks.
@@ -773,17 +771,14 @@ Block-based freshness is preferred per §3 "Timing Rule" — wall-clock timestam
 ### Processing Flow
 
 1. Monitor scans transactions from `admin.wallet_address` in each block range
-2. Destination check (based on `destination_mode`):
-   - `any`: accept all tx destinations
-   - `self`: only `tx.to == admin.wallet_address`
-   - `server`: only `tx.to == ethers.computeAddress(server_public_key)`
-   - `null`: only `tx.to == destination_address`
-3. ECIES decryption of `tx.data` using `/etc/blockhost/server.key`
-4. Parse JSON payload, validate command format
-5. **Freshness check** — block-based when payload carries `block_height` AND `max_command_age_blocks` is set: reject if `current_height - payload.block_height > max_command_age_blocks` or `payload.block_height > current_height + skew_tolerance` (suggest 2-block future tolerance). Otherwise fall back to timestamp check using `payload.timestamp` and `max_command_age` (seconds). Block-based wins when both are present.
-6. Nonce anti-replay check (each nonce used only once)
-7. Dispatch to action handler (lookup in command database)
-8. Log result
+2. ECIES decryption of `tx.data` using `/etc/blockhost/server.key`
+3. Parse JSON payload, validate command format
+4. **Freshness check** — block-based when payload carries `block_height` AND `max_command_age_blocks` is set: reject if `current_height - payload.block_height > max_command_age_blocks` or `payload.block_height > current_height + skew_tolerance` (suggest 2-block future tolerance). Otherwise fall back to timestamp check using `payload.timestamp` and `max_command_age` (seconds). Block-based wins when both are present.
+5. Nonce anti-replay check (each nonce used only once)
+6. Dispatch to action handler (lookup in command database)
+7. Log result
+
+Sender authenticity is established by the `admin.wallet_address` filter (step 1); per-server targeting is established by ECIES decryption with the host's `server.key` (step 2). Together those make a separate `tx.to` filter redundant.
 
 ### Command Payload (encrypted in tx.data)
 
