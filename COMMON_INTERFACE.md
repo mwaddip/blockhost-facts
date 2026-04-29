@@ -60,7 +60,7 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
-| `register_vm` | `(name, vmid, ip, ipv6=None, owner="", expiry_days=30, purpose="", wallet_address=None, username=None, network_mode=None)` | `dict` (VM record) | **Provisioner-owned.** Creates new record. Rejects duplicate `name` regardless of status — call `delete_vm` first to clobber a destroyed record. The provisioner calls this from `vm-create` before printing its result line; engines do NOT call it. `network_mode` is required (per `NETWORK_INTERFACE.md`) — provisioners read `/etc/blockhost/network-mode` at vm-create time and pass that value through; common rejects empty/missing `network_mode`. |
+| `register_vm` | `(name, vmid, ip, ipv6=None, owner="", expiry_days=30, purpose="", wallet_address=None, username=None, network_mode=None)` | `dict` (VM record) | **Provisioner-owned.** Creates new record. Rejects duplicate `name` regardless of status — call `delete_vm` first to clobber a destroyed record. The provisioner calls this from `vm-create` before printing its result line; engines do NOT call it. `network_mode` is required (per `NETWORK_INTERFACE.md`) — provisioners resolve the active mode by listing `/etc/blockhost/network-modes.enabled/` (single symlink today; multi-mode resolution per-VM in the future) and pass it through; common rejects empty/missing `network_mode`. |
 | `get_vm` | `(name)` | `Optional[dict]` | Lookup by name |
 | `list_vms` | `(status=None)` | `list[dict]` | Filter: `"active"`, `"suspended"`, `"destroyed"`, or `None` for all |
 | `extend_expiry` | `(name, days)` | `None` | Engine-owned. Extends from current expiry. |
