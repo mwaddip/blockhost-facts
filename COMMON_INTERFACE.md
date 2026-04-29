@@ -400,20 +400,21 @@ Common neither knows nor cares what those keys mean — engines pick names that 
 
 ### `blockhost-network-hook`
 
-Network-layer dispatcher. Common ships only the dispatcher; mode-specific logic lives in plugins under `/usr/share/blockhost/network/<mode>/`. Full spec: `NETWORK_INTERFACE.md`.
+Network-layer dispatcher. Common ships only the dispatcher; mode-specific logic lives in plugins. Plugin manifests live in `/etc/blockhost/network-modes.available/`; activation is by symlink in `/etc/blockhost/network-modes.enabled/` (apache `sites-available`/`sites-enabled` pattern). Full spec: `NETWORK_INTERFACE.md`.
 
 | Subcommand | Args | Stdout | Exit | Description |
 |------------|------|--------|------|-------------|
-| `public-address` | `<vm_name>` | publicly-routable address, single line | 0 ok / 1 error | Resolves VM's `network_mode` from vm-db, dispatches to plugin's `public-address`. |
-| `push-vm-config` | `<vm_name>` | (empty) | 0 ok / 1 retry | Idempotent VM-side config push (libpam-web3 signing host etc.). Engine + reconciler call this. |
-| `cleanup` | `<vm_name>` | (empty) | 0 ok / 1 error | Releases per-VM resources, both host and guest side. |
-| `host-setup` | `<mode>` | (empty) | 0 ok / 1 error | One-time host setup at finalization. Mode passed in (no VM yet). |
-| `host-teardown` | `<mode>` | (empty) | 0 ok / 1 error | Reverses `host-setup`. |
-| `pre-provision` | `<mode> <plan-id>` | JSON map of plan-keyed pre-allocated values | 0 ok / 1 error | Future: lets plans declare network mode and pre-allocate values before vm-create. No engine calls this today. |
-| `mode` | `<vm_name>` | resolved mode string (debugging) | 0 ok / 1 error | Echo `vm-db.network_mode[<vm>]`. |
-| `list-modes` | — | list of installed plugin manifests | 0 ok | Lists `/usr/share/blockhost/network/*.json`. |
+| `public-address` | `<vm_name>` | publicly-routable address | 0 / 1 | Resolves VM's `network_mode` from vm-db, dispatches to enabled plugin's `public-address`. |
+| `push-vm-config` | `<vm_name>` | (empty) | 0 / 1 retry | Idempotent VM-side config push. |
+| `cleanup` | `<vm_name>` | (empty) | 0 / 1 | Releases per-VM resources (host + guest). |
+| `pre-provision` | `<mode> <plan-id>` | JSON map | 0 / 1 | Future: pre-allocate values before vm-create. |
+| `mode` | `<vm_name>` | resolved mode | 0 / 1 | Echo `vm-db.network_mode[<vm>]`. |
+| `list-available` | — | mode names | 0 | Lists `network-modes.available/`. |
+| `list-enabled` | — | mode names | 0 | Lists `network-modes.enabled/`. |
+| `enable` | `<mode>` | (empty) | 0 / 1 | Create symlink. Validates `exclusive_with` against currently-enabled modes; rejects on conflict. |
+| `disable` | `<mode>` | (empty) | 0 / 1 | Remove symlink. |
 
-VM-keyed subcommands resolve `network_mode` via vm-db. Missing `network_mode` is a hard error (no fallback to global). If the resolved plugin has no manifest at `/usr/share/blockhost/network/<mode>.json`, the dispatcher exits non-zero. Plugin commands are forwarded with stdout/stderr/exit code preserved.
+VM-keyed subcommands resolve `network_mode` via vm-db. Missing `network_mode` is a hard error (no fallback). The dispatcher then resolves `/etc/blockhost/network-modes.enabled/<mode>.json`; missing or dangling → exit non-zero. Plugin commands are forwarded with stdout/stderr/exit code preserved.
 
 ---
 
@@ -505,22 +506,32 @@ contract_address: "0x..."
 **Owned by**: installer / init scripts
 **Read by**: `load_blockhost_config()`, validate_system.py
 
-### `/etc/blockhost/network-mode`
+### `/etc/blockhost/network-modes.available/` and `network-modes.enabled/`
+
+apache `sites-available`/`sites-enabled` pattern. Manifests for installed plugins live in `available/`. Activation is by symlink under `enabled/`.
 
 ```
-broker
+/etc/blockhost/network-modes.available/
+  ├── onion.json
+  ├── broker.json
+  ├── manual.json
+  └── none.json
+/etc/blockhost/network-modes.enabled/
+  └── onion.json -> ../network-modes.available/onion.json
 ```
 
-Single line containing the active network mode (`broker`, `manual`, `onion`, …). Written by wizard finalization. The provisioner reads this at `vm-create` time and snapshots it into each VM's `network_mode` field via `register_vm`. After provisioning, dispatch is per-VM via `vm-db.network_mode` — this file is not consulted at runtime.
+The provisioner picks the active mode by reading `enabled/`. With one symlink, that's deterministic. With multiple symlinks (future multi-mode), the provisioner consults a per-VM source (plan id, wizard choice) to pick which one. Either way, the chosen mode is snapshotted into the VM's `network_mode` field via `register_vm`.
 
-**Owned by**: wizard finalization
-**Read by**: provisioner (`vm-create` → snapshots to vm-db), `validate_system.py`
+Manifests describe each plugin: name, display, exclusivity, command paths, and finalization hooks. Schema in `NETWORK_INTERFACE.md §3`.
+
+**Owned by**: package install drops manifests in `available/`; wizard finalization manages symlinks in `enabled/`.
+**Read by**: dispatcher (`blockhost-network-hook`), wizard, provisioner, `validate_system.py`.
 
 ### Network plugins
 
-Common ships only the dispatcher CLI (`blockhost-network-hook`, see `§6a`). Mode-specific code (onion, broker, manual, none) lives in plugins under `/usr/share/blockhost/network/<mode>/`, manifested at `/usr/share/blockhost/network/<mode>.json`. Plugins ship from main repo / installer, not from common.
+Common ships only the dispatcher CLI (`blockhost-network-hook`, see `§6a`). Mode-specific code (onion, broker, manual, none) lives in plugins under `/usr/share/blockhost/network/<mode>/`, with manifests in `/etc/blockhost/network-modes.available/`. Plugins ship from main repo / installer, not from common.
 
-Full plugin contract (manifest schema, command set, lifecycle) lives in `NETWORK_INTERFACE.md`.
+Full plugin contract lives in `NETWORK_INTERFACE.md`.
 
 Each plugin may ship its own root-agent action module (e.g. onion's hidden-service add/remove) under `/usr/share/blockhost/root-agent-actions/`. Common's root-agent stays a generic privilege boundary; it does not bake in `tor-*` or other mode-specific actions.
 

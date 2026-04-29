@@ -173,7 +173,7 @@ The provisioner MUST call `blockhost.vm_db.register_vm` with the same data it wi
 Sequence:
 
 1. Allocate resources (VMID, IPv4, IPv6) via `blockhost.vm_db` allocators.
-2. Read the active `network_mode` from `/etc/blockhost/network-mode` (single line, e.g. `onion`). This snapshot is what the VM record will carry for the rest of its life — see `NETWORK_INTERFACE.md`.
+2. Resolve the active `network_mode`. Today: list `/etc/blockhost/network-modes.enabled/`, take the single enabled mode (file basename minus `.json`). Tomorrow (multi-mode): plan-id or wizard choice picks from the enabled set. Either way the chosen value is snapshotted into the VM's record for the rest of its life — see `NETWORK_INTERFACE.md`.
 3. Define and start the VM (qemu/libvirt/proxmox-specific work).
 4. **Wait for guest readiness** — see "Guest readiness" below.
 5. Call `register_vm(name=..., vmid=..., ip=..., ipv6=..., owner=..., expiry_days=..., wallet_address=..., username=..., network_mode=...)`.
