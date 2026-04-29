@@ -569,13 +569,17 @@ The monitor is the adapter boundary between the chain and the provisioner. It tr
 2. Calculate expiry days from `expiresAt` timestamp
 3. Decrypt `userEncrypted` using server private key (ECIES). If decryption fails, abort before creating VM.
 4. Call provisioner: `blockhost-vm-create blockhost-NNN --owner-wallet <subscriber> --expiry-days <days> --apply`
-5. Parse the provisioner's `BLOCKHOST_RESULT:`-prefixed JSON line (ip, vmid, ipv6, username) — see `PROVISIONER_INTERFACE.md §2`. **The provisioner has already registered the VM in `vms.json` at this point.**
-6. Encrypt connection details (hostname, port, username) using decrypted user signature (symmetric)
-7. Call: `blockhost-mint-nft --owner-wallet <subscriber> --user-encrypted <encrypted_details>` → parse the `BLOCKHOST_RESULT:`-prefixed token ID from stdout
-8. Call provisioner: `blockhost-vm-update-gecos blockhost-NNN <subscriber> --nft-id <actual_token_id>`
-9. Mark NFT minted via `blockhost-vmdb mark-nft-minted <vm_name> <token_id>` (or the underlying Python API)
+5. Parse the provisioner's `BLOCKHOST_RESULT:`-prefixed JSON line (ip, vmid, ipv6, username) — see `PROVISIONER_INTERFACE.md §2`. **The provisioner has already registered the VM in `vms.json` at this point** (with its `network_mode` snapshotted from the active host config).
+6. Resolve the VM's public address: `blockhost-network-hook public-address blockhost-NNN`. The dispatcher reads `vm-db.network_mode` and asks the relevant plugin. **No fallback** — if this fails, abort the handler (no NFT mint with garbage data). See `NETWORK_INTERFACE.md`.
+7. Encrypt connection details (hostname=public_address, port, username) using decrypted user signature (symmetric)
+8. Call: `blockhost-mint-nft --owner-wallet <subscriber> --user-encrypted <encrypted_details>` → parse the `BLOCKHOST_RESULT:`-prefixed token ID from stdout
+9. Push VM-side network config: `blockhost-network-hook push-vm-config blockhost-NNN`. Idempotent; failure is non-fatal here (reconciler retries).
+10. Call provisioner: `blockhost-vm-update-gecos blockhost-NNN <subscriber> --nft-id <actual_token_id>`
+11. Mark NFT minted via `blockhost-vmdb mark-nft-minted <vm_name> <token_id>` (or the underlying Python API)
 
 No token reservation. The actual minted token ID comes from `blockhost-mint-nft` stdout, then gets baked into GECOS via `update-gecos`. If any step fails partway, the reconciler picks up missing NFTs on its next cycle.
+
+**Network-mode agnosticism.** The engine never branches on `onion`/`broker`/`manual`. It calls `blockhost-network-hook` for every network-shaped concern (address resolution, VM-side config push, cleanup) and treats the result as opaque. Adding a new mode is a plugin-only change; no engine code touches.
 
 **Database ownership:** the engine does NOT call `register_vm`. The provisioner owns VM-record creation as part of `vm-create` — by the time the provisioner returns its result line, the record already exists in `vms.json`. See `PROVISIONER_INTERFACE.md §2 vm-create / Database side effects` for the contract on the provisioner side. Engines only call NFT-related vm_db methods (`set_nft_minted`, `extend_expiry`).
 
@@ -585,7 +589,8 @@ No token reservation. The actual minted token ID comes from `blockhost-mint-nft`
 3. If VM was suspended: call provisioner `resume` command
 
 **`SubscriptionCancelled`:**
-1. Call provisioner: `blockhost-vm-destroy blockhost-NNN`
+1. Call: `blockhost-network-hook cleanup blockhost-NNN` (releases per-VM network resources, both host- and guest-side)
+2. Call provisioner: `blockhost-vm-destroy blockhost-NNN`
 
 The provisioner owns `mark_destroyed` as part of `vm-destroy`. The engine does NOT mark the record destroyed itself; the provisioner does so after the VM is gone. See `PROVISIONER_INTERFACE.md §2 vm-destroy / Database side effects`.
 
@@ -607,6 +612,8 @@ Verifies local `vms.json` NFT state matches on-chain. Two responsibilities:
 - On success, sets `gecos_synced = true`
 
 If `update-gecos` fails (VM stopped, guest agent unresponsive), `gecos_synced = false` persists and the next cycle retries. This is the sole mechanism by which VMs learn about NFT ownership changes post-creation. libpam-web3 verifies signatures against the GECOS-stored wallet address — no chain queries at auth time.
+
+**3. VM-side network config retry.** Each cycle also re-runs `blockhost-network-hook push-vm-config` for every active VM where the previous push didn't confirm success. The dispatcher's plugin-level idempotency makes this safe to call repeatedly. Tracked via a per-VM flag (e.g. `network_config_synced` on the VM record) that the engine clears when the push fails and sets when it succeeds.
 
 **Config reads:** `web3-defaults.yaml` (nft_contract), `blockhost.yaml` (fallback)
 
@@ -1364,35 +1371,39 @@ All format validation in the admin panel (`auth.py`, `system.py`) now comes from
 
 ---
 
-## 13. Network Hook Integration
+## 13. Network-layer Integration
 
-The engine handler (fund manager / subscription handler) calls the network hook after VM creation to resolve the subscriber-facing connection endpoint. The engine itself is network-mode-agnostic — it calls `get_connection_endpoint()` and receives an opaque host string.
+Network-shaped concerns are dispatched through `blockhost-network-hook`. The engine never reads `/etc/blockhost/network-mode`, never branches on `onion`/`broker`/`manual`, never calls into `blockhost.network_hook` Python. Full plugin contract: `NETWORK_INTERFACE.md`.
 
 ### VM Creation Flow
 
 ```
-1. If broker mode: broker-client allocation (existing)
-2. provisioner.create(name, wallet, ...) → {ip, ipv6, vmid, username}
-3. host = get_connection_endpoint(vm_name, result.ip, network_mode)
-     → broker:  result.ipv6
-     → manual:  static_ip from config
-     → onion:   creates hidden service, pushes .onion to VM, returns .onion
-4. Mint NFT (existing)
-5. provisioner.guest-exec(name, "sed GECOS with NFT ID")
-6. encrypt_connection_details({host, port: 22}) → subscriber
+1. provisioner.create(name, wallet, ...) → {ip, ipv6, vmid, username}
+   (provisioner has snapshotted /etc/blockhost/network-mode into vm-db.network_mode for this VM)
+2. host = blockhost-network-hook public-address <vm-name>
+     → dispatcher resolves vm-db.network_mode, asks the plugin
+     → no fallback — failure aborts the handler
+3. encrypt_connection_details({host, port: 22, username}) → subscriber
+4. blockhost-mint-nft → token_id
+5. blockhost-network-hook push-vm-config <vm-name>
+     → idempotent VM-side config push (mode-specific, opaque to engine)
+     → failure non-fatal here; reconciler retries
+6. blockhost-vm-update-gecos <name> <wallet> --nft-id <token_id>
+7. blockhost-vmdb mark-nft-minted <name> <token_id>
 ```
 
 ### VM Destroy Flow
 
 ```
-1. provisioner.destroy(name)
-2. network_hook.cleanup(name, network_mode)
-3. Broker release if applicable
+1. blockhost-network-hook cleanup <vm-name>
+     → releases per-VM resources (host- and guest-side)
+2. provisioner.destroy(name)
+   (provisioner calls mark_destroyed itself per PROVISIONER_INTERFACE.md §2)
 ```
 
-### Network Mode
+### Reconciler
 
-The engine reads the current network mode from `/etc/blockhost/network-mode` (single line: `broker`, `manual`, or `onion`). Written by wizard finalization. If the file is absent, default to `broker` for backwards compatibility.
+The engine reconciler retries `blockhost-network-hook push-vm-config` for every active VM where the prior push didn't confirm success (tracked via an engine-defined `network_config_synced` boolean on the VM record). Idempotent calls — safe to invoke every cycle.
 
 ### Guest-Exec
 

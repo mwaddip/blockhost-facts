@@ -173,18 +173,21 @@ The provisioner MUST call `blockhost.vm_db.register_vm` with the same data it wi
 Sequence:
 
 1. Allocate resources (VMID, IPv4, IPv6) via `blockhost.vm_db` allocators.
-2. Define and start the VM (qemu/libvirt/proxmox-specific work).
-3. **Wait for guest readiness** — see "Guest readiness" below.
-4. Call `register_vm(name=..., vmid=..., ip=..., ipv6=..., owner=..., expiry_days=..., wallet_address=..., username=...)`.
-5. Print the `BLOCKHOST_RESULT:` line.
+2. Read the active `network_mode` from `/etc/blockhost/network-mode` (single line, e.g. `onion`). This snapshot is what the VM record will carry for the rest of its life — see `NETWORK_INTERFACE.md`.
+3. Define and start the VM (qemu/libvirt/proxmox-specific work).
+4. **Wait for guest readiness** — see "Guest readiness" below.
+5. Call `register_vm(name=..., vmid=..., ip=..., ipv6=..., owner=..., expiry_days=..., wallet_address=..., username=..., network_mode=...)`.
+6. Print the `BLOCKHOST_RESULT:` line.
 
 If `register_vm` raises (e.g. duplicate name), the provisioner MUST destroy the partially-created VM and exit non-zero. Engines do not call `register_vm` themselves.
+
+**`network_mode` is required.** Common rejects empty/missing values. The provisioner does NOT consult or invoke any network plugin itself — it just snapshots the global mode into the VM record. The engine handles per-VM network setup post-create via `blockhost-network-hook`.
 
 #### Guest readiness
 
 Before printing `BLOCKHOST_RESULT:`, the provisioner MUST verify that the VM is responsive enough for downstream guest-exec operations.
 
-The engine immediately calls `network_hook` (writes `/etc/hosts`) and `update-gecos` (writes the wallet/NFT info that libpam-web3 reads for authentication) via guest-exec after `vm-create` returns. If the guest agent is not yet responsive, those calls fail and the customer's VM is left without a working GECOS field — `ssh` connections cannot authenticate.
+The engine immediately calls `blockhost-network-hook push-vm-config` (which writes mode-specific config like libpam-web3's signing host) and `update-gecos` (which writes the wallet/NFT info that libpam-web3 reads for authentication) via guest-exec after `vm-create` returns. If the guest agent is not yet responsive, those calls fail and the customer's VM is left without working auth config — `ssh` connections cannot authenticate.
 
 Implementation:
 
@@ -460,9 +463,9 @@ Updates the GECOS field of the VM's primary user to reflect a new wallet address
 blockhost-vm-guest-exec <name> <command...>
 ```
 
-Executes a shell command inside a running VM. General-purpose primitive used by the
-network hook (for pushing `.onion` addresses, updating `/etc/hosts`, updating signing URLs)
-and by `update-gecos` (which delegates to this command).
+Executes a shell command inside a running VM. General-purpose primitive used by network
+plugins (for pushing mode-specific VM-side config — `.onion` addresses, libpam-web3 signing
+host, etc.) and by `update-gecos` (which delegates to this command).
 
 | Arg | Required | Description |
 |-----|----------|-------------|
@@ -475,7 +478,7 @@ and by `update-gecos` (which delegates to this command).
 
 **Exit:** Exit code of the command run inside the VM. 0 = success. Non-zero = command failed.
 
-**Consumers:** Network hook (onion routing setup/teardown), engine handler (GECOS updates), admin panel (future).
+**Consumers:** Network plugins (mode-specific VM-side config push), engine handler (GECOS updates), admin panel (future).
 
 **Note:** The VM must be running with a responsive guest agent. If the guest agent is unresponsive, the command fails and callers retry.
 

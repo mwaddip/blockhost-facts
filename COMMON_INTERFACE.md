@@ -60,7 +60,7 @@ Returns `MockVMDatabase` if `use_mock=True`, otherwise `VMDatabase`.
 
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
-| `register_vm` | `(name, vmid, ip, ipv6=None, owner="", expiry_days=30, purpose="", wallet_address=None, username=None)` | `dict` (VM record) | **Provisioner-owned.** Creates new record. Rejects duplicate `name` regardless of status — call `delete_vm` first to clobber a destroyed record. The provisioner calls this from `vm-create` before printing its result line; engines do NOT call it. |
+| `register_vm` | `(name, vmid, ip, ipv6=None, owner="", expiry_days=30, purpose="", wallet_address=None, username=None, network_mode=None)` | `dict` (VM record) | **Provisioner-owned.** Creates new record. Rejects duplicate `name` regardless of status — call `delete_vm` first to clobber a destroyed record. The provisioner calls this from `vm-create` before printing its result line; engines do NOT call it. `network_mode` is required (per `NETWORK_INTERFACE.md`) — provisioners read `/etc/blockhost/network-mode` at vm-create time and pass that value through; common rejects empty/missing `network_mode`. |
 | `get_vm` | `(name)` | `Optional[dict]` | Lookup by name |
 | `list_vms` | `(status=None)` | `list[dict]` | Filter: `"active"`, `"suspended"`, `"destroyed"`, or `None` for all |
 | `extend_expiry` | `(name, days)` | `None` | Engine-owned. Extends from current expiry. |
@@ -116,6 +116,7 @@ There is no separate NFT reservation lifecycle. The engine handler mints the NFT
     "owner": str,
     "wallet_address": Optional[str],
     "username": Optional[str],       # Linux username provisioned on the VM (set by register_vm)
+    "network_mode": str,             # Plugin name from /usr/share/blockhost/network/<mode>.json — set at register_vm, immutable
     "purpose": str,
     "created_at": str,       # ISO 8601
     "expires_at": str,       # ISO 8601
@@ -399,14 +400,20 @@ Common neither knows nor cares what those keys mean — engines pick names that 
 
 ### `blockhost-network-hook`
 
-Wraps `blockhost.network_hook` for engines that need to compute connection endpoints without spawning Python per call.
+Network-layer dispatcher. Common ships only the dispatcher; mode-specific logic lives in plugins under `/usr/share/blockhost/network/<mode>/`. Full spec: `NETWORK_INTERFACE.md`.
 
-| Subcommand | Args | Stdout | Exit | Wraps |
-|------------|------|--------|------|-------|
-| `resolve` | `<vm_name> <bridge_ip> <mode>` | subscriber-facing host (single line) | 0 ok / 1 error | `network_hook.get_connection_endpoint` |
-| `cleanup` | `<vm_name> <mode>` | (empty) | 0 ok / 1 error | `network_hook.cleanup` |
+| Subcommand | Args | Stdout | Exit | Description |
+|------------|------|--------|------|-------------|
+| `public-address` | `<vm_name>` | publicly-routable address, single line | 0 ok / 1 error | Resolves VM's `network_mode` from vm-db, dispatches to plugin's `public-address`. |
+| `push-vm-config` | `<vm_name>` | (empty) | 0 ok / 1 retry | Idempotent VM-side config push (libpam-web3 signing host etc.). Engine + reconciler call this. |
+| `cleanup` | `<vm_name>` | (empty) | 0 ok / 1 error | Releases per-VM resources, both host and guest side. |
+| `host-setup` | `<mode>` | (empty) | 0 ok / 1 error | One-time host setup at finalization. Mode passed in (no VM yet). |
+| `host-teardown` | `<mode>` | (empty) | 0 ok / 1 error | Reverses `host-setup`. |
+| `pre-provision` | `<mode> <plan-id>` | JSON map of plan-keyed pre-allocated values | 0 ok / 1 error | Future: lets plans declare network mode and pre-allocate values before vm-create. No engine calls this today. |
+| `mode` | `<vm_name>` | resolved mode string (debugging) | 0 ok / 1 error | Echo `vm-db.network_mode[<vm>]`. |
+| `list-modes` | — | list of installed plugin manifests | 0 ok | Lists `/usr/share/blockhost/network/*.json`. |
 
-`mode` is `broker` / `manual` / `onion` per §7's network-mode docs.
+VM-keyed subcommands resolve `network_mode` via vm-db. Missing `network_mode` is a hard error (no fallback to global). If the resolved plugin has no manifest at `/usr/share/blockhost/network/<mode>.json`, the dispatcher exits non-zero. Plugin commands are forwarded with stdout/stderr/exit code preserved.
 
 ---
 
@@ -504,40 +511,18 @@ contract_address: "0x..."
 broker
 ```
 
-Single line containing the network mode: `broker`, `manual`, or `onion`. Written by wizard finalization. Read by first-boot (skips broker-client install in onion mode), engine handler (passes to network hook), and the network hook itself.
+Single line containing the active network mode (`broker`, `manual`, `onion`, …). Written by wizard finalization. The provisioner reads this at `vm-create` time and snapshots it into each VM's `network_mode` field via `register_vm`. After provisioning, dispatch is per-VM via `vm-db.network_mode` — this file is not consulted at runtime.
 
 **Owned by**: wizard finalization
-**Read by**: first-boot, engine handler, network hook
+**Read by**: provisioner (`vm-create` → snapshots to vm-db), `validate_system.py`
 
-### Network Hook
+### Network plugins
 
-Module: `blockhost.network_hook`
+Common ships only the dispatcher CLI (`blockhost-network-hook`, see `§6a`). Mode-specific code (onion, broker, manual, none) lives in plugins under `/usr/share/blockhost/network/<mode>/`, manifested at `/usr/share/blockhost/network/<mode>.json`. Plugins ship from main repo / installer, not from common.
 
-Provides network-mode-agnostic connection endpoint resolution. The engine handler calls this after `provisioner.create()` to get the endpoint subscribers use to connect.
+Full plugin contract (manifest schema, command set, lifecycle) lives in `NETWORK_INTERFACE.md`.
 
-```python
-get_connection_endpoint(vm_name: str, bridge_ip: str, mode: str) -> str
-```
-
-| Mode | Behavior | Returns |
-|------|----------|---------|
-| `broker` | Pass-through (IPv6 from broker-allocation.json) | IPv6 address string |
-| `manual` | Pass-through (static IP) | Static IP string |
-| `onion` | Calls root agent `tor-hidden-service-add`, pushes `.onion` into VM via `guest-exec`, updates signing URL | `.onion` address |
-
-```python
-cleanup(vm_name: str, mode: str) -> None
-```
-
-Removes network resources on VM destroy. Onion mode calls root agent `tor-hidden-service-remove`.
-
-### Root Agent — Tor Actions
-
-The root agent (`root_agent_actions/system.py`) provides two actions for hidden service lifecycle:
-
-**`tor-hidden-service-add`:** Params: `vm_name`, `bridge_ip`, `port=22`. Creates `/var/lib/tor/blockhost-{name}/`, appends `HiddenServiceDir` and `HiddenServicePort` to `/etc/tor/torrc`, reloads tor, reads the generated `.onion` from the `hostname` file, returns it.
-
-**`tor-hidden-service-remove`:** Params: `vm_name`. Removes matching lines from `/etc/tor/torrc`, reloads tor, deletes `/var/lib/tor/blockhost-{name}/`.
+Each plugin may ship its own root-agent action module (e.g. onion's hidden-service add/remove) under `/usr/share/blockhost/root-agent-actions/`. Common's root-agent stays a generic privilege boundary; it does not bake in `tor-*` or other mode-specific actions.
 
 ---
 
@@ -559,10 +544,10 @@ The root agent (`root_agent_actions/system.py`) provides two actions for hidden 
   ├── config.py                  # Configuration loading
   ├── vm_db.py                   # VM database abstraction
   ├── provisioner.py             # Provisioner dispatcher
+  ├── network.py                 # Network-plugin dispatcher (used by blockhost-network-hook CLI)
   ├── root_agent.py              # Root agent client
   ├── cloud_init.py              # Template rendering
-  ├── naming.py                  # Domain-name validators (see §5a)
-  └── network_hook.py            # Connection endpoint resolution (see §7)
+  └── naming.py                  # Domain-name validators (see §5a)
 
 /usr/share/blockhost/
   ├── root-agent/
