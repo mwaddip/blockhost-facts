@@ -173,11 +173,26 @@ The provisioner MUST call `blockhost.vm_db.register_vm` with the same data it wi
 Sequence:
 
 1. Allocate resources (VMID, IPv4, IPv6) via `blockhost.vm_db` allocators.
-2. Provision the VM (qemu/libvirt/proxmox-specific work).
-3. Call `register_vm(name=..., vmid=..., ip=..., ipv6=..., owner=..., expiry_days=..., wallet_address=..., username=...)`.
-4. Print the `BLOCKHOST_RESULT:` line.
+2. Define and start the VM (qemu/libvirt/proxmox-specific work).
+3. **Wait for guest readiness** — see "Guest readiness" below.
+4. Call `register_vm(name=..., vmid=..., ip=..., ipv6=..., owner=..., expiry_days=..., wallet_address=..., username=...)`.
+5. Print the `BLOCKHOST_RESULT:` line.
 
 If `register_vm` raises (e.g. duplicate name), the provisioner MUST destroy the partially-created VM and exit non-zero. Engines do not call `register_vm` themselves.
+
+#### Guest readiness
+
+Before printing `BLOCKHOST_RESULT:`, the provisioner MUST verify that the VM is responsive enough for downstream guest-exec operations.
+
+The engine immediately calls `network_hook` (writes `/etc/hosts`) and `update-gecos` (writes the wallet/NFT info that libpam-web3 reads for authentication) via guest-exec after `vm-create` returns. If the guest agent is not yet responsive, those calls fail and the customer's VM is left without a working GECOS field — `ssh` connections cannot authenticate.
+
+Implementation:
+
+- For QEMU-based provisioners (libvirt, proxmox): poll the `guest-ping` qemu-guest-agent command until it succeeds.
+- Recommended timeout: 180 seconds. Cloud-init can take a while on slow hardware or under nested virtualisation.
+- On timeout, destroy the partial VM and exit non-zero. Do NOT print `BLOCKHOST_RESULT:`.
+
+This applies only when `--apply` is set; dry-run plans skip the readiness check.
 
 **Migration / idempotency:** during the rollout there is a brief window where an old engine still calls `register_vm` after the new provisioner has already done so. The duplicate call raises `ValueError`; engines that handle this gracefully (warn-and-continue) tolerate the migration. Provisioners deploy before engines.
 
