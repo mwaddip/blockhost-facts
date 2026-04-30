@@ -2,10 +2,16 @@
 
 > Authoritative reference for the blockchain adapter boundary.
 > The engine is the only component that talks to the chain bidirectionally.
-> Any second engine implementation (e.g., `blockhost-engine-opnet`) must satisfy
-> this contract to be a drop-in replacement.
+> Any engine implementation (`blockhost-engine-evm`, `blockhost-engine-opnet`,
+> `blockhost-engine-cardano`, `blockhost-engine-ergo`, future engines) must
+> satisfy this contract to be a drop-in replacement.
 >
-> Derived from the working EVM implementation (`blockhost-engine-evm`).
+> Reference implementation is `blockhost-engine-evm` and the prose throughout
+> uses EVM/Solidity terminology where it's the most concrete. Chain-specific
+> equivalents (UTXO scans for `ownerOf`, native-token shortcuts other than
+> `eth`, etc.) are noted inline. Engine-internal mechanism details that don't
+> cross the consumer boundary live in §2 and §4 explicitly marked as such.
+>
 > See also: `COMMON_INTERFACE.md` (shared library API), `ADMIN_INTERFACE.md`
 > (admin panel — a consumer of engine CLIs).
 
@@ -22,11 +28,11 @@ to these as subprocesses. Exit 0 = success, non-zero = failure (stderr has error
 
 **Installed:** `/usr/bin/is`
 
-Standalone binary. Answers yes/no identity questions via exit code. No env vars, no addressbook — pure on-chain queries. Arguments are order-independent; types are unambiguous (addresses are `0x` + 40 hex, NFT IDs are integers, `contract` is a keyword).
+Standalone binary. Answers yes/no identity questions via exit code. No env vars, no addressbook — pure on-chain queries. Arguments are order-independent; the disambiguation rule is stable across chains: `contract` is a literal keyword, NFT IDs are integers, anything else is a wallet/contract address (matching the engine's `constraints.address_pattern`).
 
 #### `is <wallet> <nft_id>`
 
-Check whether a wallet owns a specific NFT. Queries `ownerOf(tokenId)` on the AccessCredentialNFT contract, compares with provided wallet.
+Check whether a wallet owns a specific NFT. Resolves the NFT's current owner via the engine's NFT ownership lookup (ERC721 `ownerOf` on EVM/OPNet, UTXO scan for the asset on Cardano/Ergo) and compares with the provided wallet.
 
 **Config:** `web3-defaults.yaml` (nft_contract, rpc_url)
 **Exit:** 0 = wallet owns the NFT, 1 = does not.
@@ -79,11 +85,11 @@ bw send <amount> <token> <from> <to>
 | Arg | Required | Description |
 |-----|----------|-------------|
 | `amount` | yes | Numeric token amount |
-| `token` | yes | `eth`, `stable`, or `0x` token address |
-| `from` | yes | Addressbook role or `0x` address (must have keyfile) |
-| `to` | yes | Addressbook role or `0x` address |
+| `token` | yes | Native shortcut (per `constraints.native_token` — `eth` on EVM, `sats` on OPNet, `lovelace` on Cardano, `nanoerg` on Ergo), `stable`, or a token address (per `constraints.token_pattern`) |
+| `from` | yes | Addressbook role or address (per `constraints.address_pattern`; must have keyfile) |
+| `to` | yes | Addressbook role or address (per `constraints.address_pattern`) |
 
-**stdout:** Transaction hash on success.
+**stdout:** Transaction ID on success.
 **Exit:** 0/1.
 **Consumers:** `admin/system.py` (`_run_bw(["send", ...])`), fund-manager (internal import of `executeSend()`)
 
@@ -95,10 +101,10 @@ bw balance <role> [token]
 
 | Arg | Required | Description |
 |-----|----------|-------------|
-| `role` | yes | Addressbook role, `0x` address, or contract address (read-only — no keyfile needed) |
-| `token` | no | `eth`, `stable`, or `0x` address. If omitted, shows all active payment method tokens |
+| `role` | yes | Addressbook role, wallet address, or contract address (read-only — no keyfile needed) |
+| `token` | no | Native shortcut, `stable`, or a token address (per `constraints.token_pattern`). If omitted, shows all active payment method tokens |
 
-Works for both ERC20 tokens and NFT contracts — both implement `balanceOf()`. For NFTs, returns integer count (no decimals). The `role` argument also accepts a literal contract address (e.g., the NFT contract address), not just addressbook roles.
+Works for both fungible tokens and NFTs. For NFTs, returns integer count (no decimals). The `role` argument also accepts a literal token/contract address (e.g., the NFT contract address), not just addressbook roles. Account-model engines implement this via `balanceOf()` calls; UTXO engines compute it from a UTXO scan.
 
 **stdout:** Balance information (human-readable).
 **Exit:** 0/1.
@@ -113,12 +119,12 @@ bw split <amount> <token> <ratios> <from> <to1> <to2> ...
 | Arg | Required | Description |
 |-----|----------|-------------|
 | `amount` | yes | Total amount to split |
-| `token` | yes | `eth`, `stable`, or `0x` address |
+| `token` | yes | Native shortcut, `stable`, or a token address (per `constraints.token_pattern`) |
 | `ratios` | yes | Comma-separated numbers (e.g., `1,2,1`) |
 | `from` | yes | Signer (must have keyfile) |
 | `to1 to2 ...` | yes | Recipient addresses/roles (count must match ratio count) |
 
-**stdout:** Transaction hashes.
+**stdout:** Transaction IDs.
 **Exit:** 0/1.
 **Consumers:** fund-manager (internal)
 
@@ -135,26 +141,28 @@ bw withdraw [token] <to>
 
 Collects accumulated subscription revenue. Account-model engines call a contract withdraw function. UTXO engines scan for claimable subscription UTXOs (via beacon tokens) and batch-collect them — the `token` parameter may be ignored since each UTXO carries its own payment asset in its datum.
 
-**stdout:** Transaction hash.
+**stdout:** Transaction ID.
 **Exit:** 0/1.
 **Consumers:** `admin/system.py` (`_run_bw(["withdraw", ...])`), fund-manager (internal import of `executeWithdraw()`)
 
 #### `bw swap`
 
+> **EVM-specific.** This subcommand swaps a fungible token for the chain's native gas token via an on-chain DEX. EVM engines implement it via Uniswap V2; OPNet/Cardano/Ergo engines that don't perform on-chain swaps may omit this command (and skip the corresponding fund-manager step).
+
 ```
-bw swap <amount> <from-token> eth <wallet>
+bw swap <amount> <from-token> <native> <wallet>
 ```
 
 | Arg | Required | Description |
 |-----|----------|-------------|
 | `amount` | yes | Numeric amount of source token |
-| `from-token` | yes | `stable` or `0x` address |
-| `eth` | yes | Literal string `eth` (destination — only ETH supported) |
-| `wallet` | yes | Signer role or `0x` address (must have keyfile) |
+| `from-token` | yes | `stable` or a token address (per `constraints.token_pattern`) |
+| `<native>` | yes | Native-token shortcut (per `constraints.native_token`) — destination is always native |
+| `wallet` | yes | Signer role or address (per `constraints.address_pattern`; must have keyfile) |
 
-Uses Uniswap V2 `swapExactTokensForETH()` with 1% slippage buffer.
+EVM reference implementation: Uniswap V2 `swapExactTokensForETH()` with 1% slippage buffer.
 
-**stdout:** Transaction hash.
+**stdout:** Transaction ID.
 **Exit:** 0/1.
 **Consumers:** fund-manager gas check (internal import of `executeSwap()`)
 
@@ -171,11 +179,11 @@ bw who <message> <signature>
 
 | Arg | Required | Description |
 |-----|----------|-------------|
-| `identifier` | yes | Numeric NFT token ID, or `admin` (resolves `admin.credential_nft_id` from `blockhost.yaml`) |
+| `identifier` | yes | NFT identifier (engine-defined; integer for EVM/OPNet, opaque string for UTXO chains), or `admin` (resolves `admin.credential_nft_id` from `blockhost.yaml`) |
 
-Queries `ownerOf(tokenId)` on the AccessCredentialNFT contract. Config sourced from `web3-defaults.yaml` (`blockchain.nft_contract`, `blockchain.rpc_url`). **No env vars or addressbook required.**
+Resolves the NFT's current owner via the engine's NFT ownership lookup (ERC721 `ownerOf` on EVM/OPNet, UTXO scan for the asset on Cardano/Ergo). Config sourced from `web3-defaults.yaml` (`blockchain.nft_contract`, `blockchain.rpc_url`). **No env vars or addressbook required.**
 
-**stdout:** Owner address (`0x...`).
+**stdout:** Owner address (per `constraints.address_pattern`).
 **Exit:** 0 if found, 1 if not found or config missing.
 **Consumers:** `admin/auth.py` (`["bw", "who", "admin"]` — resolves admin NFT holder for auth)
 
@@ -184,15 +192,17 @@ Queries `ownerOf(tokenId)` on the AccessCredentialNFT contract. Config sourced f
 | Arg | Required | Description |
 |-----|----------|-------------|
 | `message` | yes | The message that was signed |
-| `signature` | yes | The signature (hex) |
+| `signature` | yes | The signature (hex; format per `constraints.signature_pattern`) |
 
 Recovers the signer address from a message and signature. Replaces `cast wallet verify` — the caller compares the returned address with the expected address. Pure crypto, no chain queries.
 
-**stdout:** Signer address (`0x...`).
+**stdout:** Signer address (per `constraints.address_pattern`).
 **Exit:** 0 if recovery succeeds, 1 on invalid signature.
 **Consumers:** `admin/auth.py` (replaces `cast wallet verify --address`; caller compares with `bw who admin` output)
 
 #### `bw config stable`
+
+> **EVM/OPNet-specific.** Engines that don't have an on-chain "primary stablecoin" concept (e.g. Cardano subscriptions priced in ADA, Ergo in ERG) may omit this command.
 
 ```
 bw config stable [address]
@@ -202,7 +212,7 @@ bw config stable [address]
 |-----|----------|-------------|
 | `address` | no | Stablecoin token address to set as primary |
 
-No argument: show current primary stablecoin address. With argument: call `setPrimaryStablecoin(address)` on the subscription contract. Replaces `cast send ... setPrimaryStablecoin` in `finalize.py`.
+No argument: show current primary stablecoin address. With argument: invoke the engine's "set primary stablecoin" mechanism (EVM reference: `setPrimaryStablecoin(address)` on the subscription contract). Replaces `cast send ... setPrimaryStablecoin` in `finalize.py`.
 
 **stdout:** Current or newly set stablecoin address.
 **Exit:** 0/1.
@@ -217,9 +227,9 @@ bw plan create <name> <price>
 | Arg | Required | Description |
 |-----|----------|-------------|
 | `name` | yes | Plan name (string) |
-| `price` | yes | Price in USD cents per day (integer) |
+| `price` | yes | Price per day in the engine's plan-pricing unit (integer). Each engine declares its unit in its manifest/wizard — USD cents on EVM/OPNet, lovelace on Cardano, nanoerg on Ergo, etc. |
 
-Calls `createPlan(name, pricePerDayUsdCents)` on the subscription contract. Replaces `cast send ... createPlan` in `finalize.py`.
+Creates a subscription plan via the engine's plan-creation mechanism (EVM reference: `createPlan(name, pricePerDayUsdCents)` on the subscription contract). Replaces `cast send ... createPlan` in `finalize.py`.
 
 **stdout:** Created plan ID.
 **Exit:** 0/1.
@@ -233,12 +243,12 @@ bw set encrypt <nft_id> <userEncrypted>
 
 | Arg | Required | Description |
 |-----|----------|-------------|
-| `nft_id` | yes | NFT token ID (integer) |
+| `nft_id` | yes | NFT identifier (engine-defined; integer for EVM/OPNet, opaque string for UTXO chains) |
 | `userEncrypted` | yes | Hex-encoded encrypted data |
 
-Calls `updateUserEncrypted(tokenId, bytes)` on the NFT contract. Replaces `cast send ... updateUserEncrypted` in `finalize.py`.
+Updates the NFT's `userEncrypted` metadata via the engine's NFT-metadata mechanism (EVM reference: `updateUserEncrypted(tokenId, bytes)` on the NFT contract). Replaces `cast send ... updateUserEncrypted` in `finalize.py`.
 
-**stdout:** Transaction hash.
+**stdout:** Transaction ID.
 **Exit:** 0/1.
 **Consumers:** Installer finalization (`_finalize_mint_nft` — update admin NFT metadata)
 
@@ -248,7 +258,7 @@ Calls `updateUserEncrypted(tokenId, bytes)` on the NFT contract. Replaces `cast 
 bw --debug --cleanup <address>
 ```
 
-Debug utility. Sweeps all ETH from signing wallets (server, hot, dev, broker) to the target address. Requires both `--debug` and `--cleanup` flags as safety guards. Skips wallets that are the target or have insufficient balance for gas.
+Debug utility. Sweeps all native-token balance from signing wallets (server, hot, dev, broker) to the target address. Requires both `--debug` and `--cleanup` flags as safety guards. Skips wallets that are the target or have insufficient balance for fees.
 
 **Consumers:** Manual/testing only.
 
@@ -256,9 +266,9 @@ Debug utility. Sweeps all ETH from signing wallets (server, hot, dev, broker) to
 
 | Shortcut | Resolves to |
 |----------|-------------|
-| `eth` | Native ETH (not an ERC20) |
-| `stable` | Contract's primary stablecoin (payment method ID 1) |
-| `0x...` | Literal token address |
+| Native shortcut | Engine's native chain currency (per `engine.json:constraints.native_token` — `eth` on EVM, `sats` on OPNet, `lovelace` on Cardano, `nanoerg` on Ergo) |
+| `stable` | Contract's primary stablecoin (payment method ID 1) on engines that have one; omitted or aliased to native on engines that don't |
+| Literal address | Token address per `constraints.token_pattern` |
 
 #### Addressbook Roles
 
@@ -285,10 +295,10 @@ Custom roles can be added via `ab add` and addressed by name.
 #### `ab add`
 
 ```
-ab add <name> <0xaddress>
+ab add <name> <address>
 ```
 
-Add a new wallet entry. Exits 1 if name is immutable or address invalid.
+Add a new wallet entry. Address format per the engine's `constraints.address_pattern`. Exits 1 if name is immutable or address invalid.
 
 **Consumers:** `admin/system.py` (`_run_ab(["add", name, address])`)
 
@@ -305,10 +315,10 @@ Delete an addressbook entry. Does NOT delete the keyfile (if any). Exits 1 if im
 #### `ab up`
 
 ```
-ab up <name> <0xaddress>
+ab up <name> <address>
 ```
 
-Update address for existing entry. Preserves `keyfile` field if present.
+Update address for existing entry. Address format per `constraints.address_pattern`. Preserves `keyfile` field if present.
 
 **Consumers:** None currently (available for admin panel future use).
 
@@ -318,7 +328,7 @@ Update address for existing entry. Preserves `keyfile` field if present.
 ab new <name>
 ```
 
-Generate new secp256k1 keypair via `bhcrypt generate-keypair`. Saves private key to `/etc/blockhost/<name>.key` (chmod 600), adds entry to addressbook with `keyfile` field.
+Generate a new wallet keypair via the engine's crypto CLI (EVM: `bhcrypt generate-keypair`; other engines ship the equivalent for their chain's wallet curve — Ed25519 on Cardano, Schnorr/secp256k1 on Ergo, etc.). Saves private key to `/etc/blockhost/<name>.key` (chmod 600), adds entry to addressbook with `keyfile` field. The wallet keypair is chain-specific and distinct from the BlockHost server keypair (always secp256k1 + ECIES regardless of chain — see §10 Crypto Layer).
 
 **Consumers:** `admin/system.py` (`_run_ab(["new", name])`)
 
@@ -354,13 +364,13 @@ The deployer/server wallet is generated interactively through the wizard UI (whi
 ```json
 {
   "role-name": {
-    "address": "0x...",
+    "address": "<chain-specific address>",
     "keyfile": "/etc/blockhost/role-name.key"
   }
 }
 ```
 
-`address` is required. `keyfile` is optional — present only for signing wallets.
+`address` format depends on the engine (`constraints.address_pattern`). `keyfile` is optional — present only for signing wallets.
 
 ---
 
@@ -451,17 +461,29 @@ blockhost-generate-signup \
 
 ---
 
-## 2. Smart Contract Interface
+## 2. Subscription Mechanism
 
-> **Scope note:** Sections 2–4 describe engine-internal semantics, not cross-boundary contracts. The function signatures below reflect the EVM/OPNet account-model pattern. UTXO-based engines (Cardano, Ergo) satisfy the same *external behavior* (plans exist, subscriptions are purchasable, funds are collectible) through different mechanisms (validator spending conditions, UTXO scanning, batch collection transactions). The portable interface boundary is the CLI commands in §1 and the monitor output behavior in §3 (triggers create/extend/destroy via provisioner CLI). Setup-only commands (`bw plan create`, `bw config stable`, `blockhost-deploy-contracts`) and revenue collection (`withdrawFunds`) are engine-internal — no other module calls them during normal operation.
+> **Scope note:** This section describes engine-internal semantics, not cross-boundary contracts. The portable interface boundary is the CLI commands in §1 and the monitor output behavior in §3 (the engine triggers create/extend/destroy via the provisioner CLI). Setup-only commands (`bw plan create`, `bw config stable`, `blockhost-deploy-contracts`) and revenue collection are engine-internal — no other module calls them during normal operation. The reference implementation below is the EVM/OPNet account-model subscription contract; UTXO engines (Cardano, Ergo) satisfy the same external behavior via validator scripts, beacon UTXOs, and batch collection transactions.
 
-The subscription contract manages plans, subscriptions, and payment methods. Any chain adapter must implement equivalent semantics.
+### Cross-boundary obligations
+
+Independent of the chain mechanism, every engine must:
+
+- Expose subscription plans (price per day, active flag) creatable by the operator and listable by signup pages.
+- Accept subscription purchases that emit a creation signal carrying at minimum: subscription identifier, plan, subscriber, expiry, paid amount, payment asset, and a `userEncrypted` payload (ECIES-encrypted connection details — see §10 Crypto Layer).
+- Accept subscription extensions that emit an update signal, allowing anyone to extend any subscription (enables gifting).
+- Accept subscription cancellations (operator-initiated) that emit a destroy signal.
+- Provide a means for the operator to collect accumulated subscription revenue (`bw withdraw`).
+
+Whatever shape the on-chain mechanism takes, the monitor (§3) translates these signals into provisioner CLI calls.
 
 ### Timing Rule
 
 **All on-chain timing must use block height, not timestamps.** Subscription expiry, fund cycles, any duration measured on-chain — express in blocks, not seconds. Block height is deterministic, monotonically increasing, and consistent across all chains. `block.timestamp` (or equivalent) is miner-adjustable, varies across chains, and drifts. The monitor and fund manager convert block heights to wall-clock estimates using the chain's known average block time when needed for display or provisioner calls — but the source of truth on-chain is always height.
 
-### Abstract Functions
+### Reference implementation: account-model contract (EVM/OPNet)
+
+The EVM and OPNet engines implement the subscription contract as a single Solidity-style smart contract. The function signatures below describe that reference; UTXO engines provide equivalent semantics via different mechanisms (see "UTXO chains" subsection below).
 
 #### Owner-only (contract deployer)
 
@@ -500,7 +522,7 @@ The subscription contract manages plans, subscriptions, and payment methods. Any
 | `getTotalPlanCount()` | `uint256` | Total plans |
 | `getSubscriptionsBySubscriber(address)` | `uint256[]` | Subscriber's subscription IDs |
 
-### Events (monitored by engine)
+#### Events (monitored by engine)
 
 | Event | Key Fields | Monitor Handler |
 |-------|-----------|-----------------|
@@ -514,7 +536,7 @@ The subscription contract manages plans, subscriptions, and payment methods. Any
 | `PaymentMethodUpdated` | `paymentMethodId, active` | Log only |
 | `FundsWithdrawn` | `token, to, amount` | Log only |
 
-### Payment Calculation
+#### Payment Calculation
 
 **Primary stablecoin (method ID 1):** Direct USD. No price discovery.
 ```
@@ -526,6 +548,20 @@ tokenAmount = pricePerDayUsdCents * days * 10^decimals / 100
 tokenAmount = (totalUsdCost * tokenReserve / stablecoinReserve) * (1 + slippageBps/10000)
 ```
 Requires `stablecoinReserve >= minLiquidityUsd` (default $10,000).
+
+UTXO engines that price subscriptions in their native unit (lovelace on Cardano, nanoerg on Ergo) skip the stablecoin/DEX layer entirely.
+
+### Reference implementation: UTXO chains (Cardano, Ergo)
+
+UTXO engines don't have a single subscription contract. Plans, subscriptions, and revenue are encoded in UTXOs guarded by validator scripts:
+
+- **Plans**: a plan UTXO at the plan validator address, datum carrying `(name, price, active)`. Created by `bw plan create` building and submitting a tx that locks the plan parameters.
+- **Subscriptions**: each subscription is its own UTXO at the subscription validator, datum carrying `(plan_ref, subscriber, expiry, payment_asset, userEncrypted)`. Discovered via beacon tokens minted alongside the subscription UTXO so the monitor can scan for them.
+- **Extensions**: spend the existing subscription UTXO, re-create with updated expiry. Any signer can do this (gifting).
+- **Cancellations**: operator-signed tx that consumes the subscription UTXO without re-creating it.
+- **Withdrawal**: the operator's `bw withdraw` builds a batch transaction collecting all spendable subscription UTXOs (filtered by beacon token) into the admin/hot wallet.
+
+Plan/subscription pricing units are engine-defined (typically the chain's smallest native unit). The "primary stablecoin" concept does not apply on these chains.
 
 ### EVM-Specific Notes
 
@@ -603,9 +639,9 @@ Log only (informational).
 
 Verifies local `vms.json` NFT state matches on-chain. Two responsibilities:
 
-**1. NFT minting reconciliation.** For each active/suspended VM where `nft_minted !== true`, queries on-chain `ownerOf(tokenId)`. If the token exists, marks it as minted locally and updates GECOS if needed. If not, logs a warning for operator attention.
+**1. NFT minting reconciliation.** For each active/suspended VM where `nft_minted !== true`, resolves the NFT's current owner via the engine's NFT ownership lookup (ERC721 `ownerOf` on EVM/OPNet, UTXO scan for the asset on Cardano/Ergo). If the token exists, marks it as minted locally and updates GECOS if needed. If not, logs a warning for operator attention.
 
-**2. NFT ownership transfer detection.** For every active/suspended VM with a minted NFT, compares `ownerOf(tokenId)` on-chain with the locally stored `owner_wallet`. When a transfer is detected:
+**2. NFT ownership transfer detection.** For every active/suspended VM with a minted NFT, compares the NFT's on-chain owner with the locally stored `owner_wallet`. When a transfer is detected:
 - Updates `owner_wallet` in `vms.json` to the new on-chain owner
 - Sets `gecos_synced = false` on the VM entry
 - Calls provisioner `update-gecos` to update the VM's GECOS field (`wallet=ADDRESS,nft=TOKEN_ID`)
@@ -630,16 +666,18 @@ Automated financial operations, integrated into the monitor polling loop.
 ### Fund Cycle (default: every 24 hours; block-based preferred)
 
 1. **Load addressbook**, ensure hot wallet exists (auto-generate via root agent if missing)
-2. **Withdraw** — for each active payment method with balance > `min_withdrawal_usd`: call `contract.withdrawFunds(token, hot_wallet)`
-3. **Hot wallet gas top-up** — if `hot.eth < hot_wallet_gas_eth`, server sends ETH to hot wallet
-4. **Server stablecoin buffer** — if `server.stablecoin < server_stablecoin_buffer_usd`, hot sends stablecoin to server
+2. **Withdraw** — collect accumulated subscription revenue to hot wallet (account-model: `contract.withdrawFunds(token, hot_wallet)` per active payment method with balance above the threshold; UTXO chains: batch-collect spendable subscription UTXOs via beacon scan)
+3. **Hot wallet fee-token top-up** — if hot wallet's native-token balance is below threshold, server tops up. (EVM: ETH for gas; OPNet: sats; Cardano/Ergo: native — same token used for both fees and revenue, so this step may be a no-op when the withdraw step already produced enough native balance.)
+4. **Server payment-token buffer** — if server's payment-token balance is below threshold, hot sends payment token to server. (EVM/OPNet only — chains where fees and revenue use the same token skip this step.)
 5. **Revenue shares** — if enabled in `revenue-share.json`, hot distributes configured % to dev, broker
 6. **Remainder to admin** — all remaining hot wallet token balances → admin
 7. **Update state:** record block height (preferred) and/or `Date.now()` — see §6 schema
 
 ### Gas Check (default: every 30 minutes; block-based preferred)
 
-1. Check server wallet ETH balance (convert to USD via Uniswap V2 pair)
+> **EVM-specific.** This step exists because EVM revenue arrives in stablecoins (USDC) but transactions need ETH for gas, requiring an on-chain swap. OPNet/Cardano/Ergo engines pay fees in the same currency they receive revenue in, so they implement Gas Check as a no-op or omit it entirely.
+
+1. Check server wallet native-token balance (convert to USD via Uniswap V2 pair)
 2. If below `gas_low_threshold_usd`: swap `gas_swap_amount_usd` of USDC → ETH
 3. Top up hot wallet gas if needed
 4. **Update state:** record block height (preferred) and/or `Date.now()` — see §6 schema
@@ -717,7 +755,9 @@ fund_manager:
 
 OPNet substitutes `_sats`, Ergo substitutes `_nanoerg` in the same positions for thresholds.
 
-### DEX Integration
+### DEX Integration (EVM-specific)
+
+> Used by the EVM engine's Gas Check step (above) and `bw swap`. OPNet, Cardano, and Ergo engines do not perform on-chain swaps as part of fund management — they may omit this module entirely.
 
 **Module:** `chain-pools.ts` — per-chain Uniswap V2 configuration.
 
@@ -922,13 +962,14 @@ When loading, engines convert `total_percent → total_bps` via `Math.round(perc
 
 | Variable | Source | Consumers | Description |
 |----------|--------|-----------|-------------|
-| `RPC_URL` | `/opt/blockhost/.env` | Monitor, bw, ab | Ethereum JSON-RPC endpoint |
-| `BLOCKHOST_CONTRACT` | `/opt/blockhost/.env` | Monitor, bw, ab | Subscription contract address |
+| `RPC_URL` | `/opt/blockhost/.env` | Monitor, bw, ab | Engine's primary chain endpoint URL (JSON-RPC on EVM/OPNet, REST on Cardano/Ergo) |
+| `BLOCKHOST_CONTRACT` | `/opt/blockhost/.env` | Monitor, bw, ab | Subscription contract reference (single contract address on account-model chains; engine-encoded reference such as policy ID + script address on UTXO chains) |
 | `NODE_OPTIONS` | Systemd unit / wrapper scripts | Monitor, bw, ab | Set to `--dns-result-order=ipv4first` |
 
 ### `.env` File Schema
 
 ```bash
+# EVM example
 RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
 BLOCKHOST_CONTRACT=0xYourContractAddressHere
 ```
@@ -1277,9 +1318,22 @@ Engine wallet templates MUST POST to the `wizard_wallet` endpoint with three for
 
 Without these exports, the installer falls back to shelling out to `bhcrypt encrypt-symmetric` / `decrypt-symmetric`.
 
+### Crypto Layer
+
+BlockHost uses **two distinct keypairs** at runtime, on different curves:
+
+| Keypair | Curve | Purpose | Where it lives |
+|---------|-------|---------|----------------|
+| **Server keypair** | secp256k1 + ECIES | Encrypts subscriber connection details (`userEncrypted` payload) and admin commands; chain-agnostic by project decision | `/etc/blockhost/server.key` (priv), `server.pubkey` (pub) — same on every chain |
+| **Wallet keypair(s)** | Chain-specific (secp256k1 on EVM/OPNet, Ed25519 on Cardano, Schnorr/secp256k1 on Ergo, ...) | Signs on-chain transactions; format dictated by the chain | `/etc/blockhost/<role>.key` — engine-owned, format set by `ab new` / engine crypto CLI |
+
+The server keypair is generated once by the wizard (`_finalize_keypair`) and never changes form across engines — every signup page, every admin command, every NFT credential payload uses secp256k1 ECIES regardless of the chain backing the engine. This is what lets a single `bhcrypt encrypt-symmetric` invocation work across all chains in cross-chain auth flows.
+
+The wallet keypair(s) are chain-specific. Cardano's Ed25519 wallet keys can't perform ECIES; the wallet curve and the server curve are deliberately separated.
+
 ### Crypto Tool Ownership
 
-The engine ships its own crypto CLI tool (EVM: `bhcrypt`, a Python port of the former `pam_web3_tool`). The tool provides chain-specific crypto operations: keypair generation, ECIES encryption/decryption, symmetric encrypt/decrypt, and address derivation. Each engine ships the appropriate implementation for its chain's cryptographic primitives.
+The engine ships its own crypto CLI tool (EVM: `bhcrypt`, a Python port of the former `pam_web3_tool`). The tool provides chain-specific crypto operations: keypair generation, ECIES encryption/decryption, symmetric encrypt/decrypt, and address derivation. Each engine ships the appropriate implementation for its chain's cryptographic primitives — but ECIES (server-keypair operations) is always secp256k1 regardless of chain.
 
 The `libpam-web3-tools` package is deprecated — its contents (crypto binary, NFT contract artifacts) are now engine-owned.
 
